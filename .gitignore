@@ -1,0 +1,46 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.sw?
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Environment and secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Test coverage
+*.profraw
+*.profdata
+coverage/
+lcov.info
+
+# Documentation build
+/docs/build/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Claude Code
+.claude/

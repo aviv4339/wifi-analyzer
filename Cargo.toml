@@ -1,0 +1,16 @@
+[package]
+name = "wifi-analyzer"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal-based WiFi analyzer with beautiful TUI for finding the best public WiFi"
+authors = ["Aviv E"]
+license = "MIT"
+default-run = "wifi-analyzer"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+wifiscanner = "0.5"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
