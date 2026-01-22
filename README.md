@@ -1,6 +1,6 @@
 # WiFi Analyzer
 
-A terminal-based WiFi analyzer with a beautiful TUI, designed to help you find the best public WiFi networks. Built with Rust and [Ratatui](https://ratatui.rs/).
+A terminal-based WiFi analyzer with a beautiful TUI, designed to help you find and connect to the best public WiFi networks. Built with Rust and [Ratatui](https://ratatui.rs/).
 
 ![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS-blue.svg)
@@ -8,31 +8,44 @@ A terminal-based WiFi analyzer with a beautiful TUI, designed to help you find t
 
 ## Features
 
-- **Real-time WiFi Scanning** - Discover all nearby WiFi networks
+- **Real-time WiFi Scanning** - Discover all nearby WiFi networks with multi-pass scanning
 - **Multi-factor Scoring** - Intelligent scoring to find the best public WiFi
 - **Beautiful TUI** - Dashboard interface with network table, details panel, and signal charts
-- **Signal History** - Track signal strength over time with sparkline charts
-- **Auto/Manual Modes** - Auto-refresh or scan on demand
-- **Sortable Views** - Sort by score, signal strength, or network name
+- **Connection Tracking** - Track connection history, timestamps, and connection counts
+- **Speed Test** - Measure download/upload speeds using Cloudflare's speed test servers
+- **IP Tracking** - View current and historical local/public IP addresses
+- **Database Persistence** - Store network data and history with DuckDB
+- **Location Support** - Organize scans by location (e.g., "office", "cafe")
+- **Auto/Manual Modes** - Auto-refresh with countdown timer or scan on demand
+- **Connect to Networks** - Quick connect via Enter key (opens System WiFi Settings)
 
 ## Screenshot
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  WiFi Analyzer                           [Auto] ⟳ 5s │ ? Help │ q Quit │
-├────────────────────────────────────────────┬────────────────────────┤
-│  Networks (12 found)           Score ▼     │  Selected: CoffeeShop  │
-│ ─────────────────────────────────────────  │ ──────────────────────  │
-│ ▶ CoffeeShop_Free      ▓▓▓▓▓░  92  OPEN   │  MAC: AA:BB:CC:DD:EE   │
-│   Airport_WiFi         ▓▓▓▓░░  78  OPEN   │  Channel: 6 (2.4GHz)   │
-│   Starbucks            ▓▓▓░░░  65  WPA2   │  Signal: -42 dBm       │
-│   Hotel_Guest          ▓▓░░░░  51  OPEN   │  Security: Open        │
-│   WeakNet              ▓░░░░░  23  WPA3   │                        │
-│                                            │  Signal History:       │
-│                                            │  ▁▂▃▄▅▆▇█▇▆▅▄ (-42)   │
-├────────────────────────────────────────────┴────────────────────────┤
-│ ↑↓ Navigate │ r Refresh │ a Auto-toggle │ s Sort │ ? Help │ q Quit │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WiFi Analyzer                    [Auto] next scan in 12s │ ? Help │ q Quit │
+├────────────────────────────────────────────┬────────────────────────────┤
+│  Networks (12 found)           Score ▼     │  Selected: CoffeeShop      │
+│ ─────────────────────────────────────────  │ ──────────────────────────  │
+│ ● CoffeeShop_Free      ▓▓▓▓▓░  92  OPEN   │  MAC: AA:BB:CC:DD:EE       │
+│   Airport_WiFi         ▓▓▓▓░░  78  OPEN   │  Channel: 6 (2.4GHz)       │
+│   Starbucks            ▓▓▓░░░  65  WPA2   │  Signal: -42 dBm           │
+│   Hotel_Guest          ▓▓░░░░  51  OPEN   │  Security: Open            │
+│   WeakNet              ▓░░░░░  23  WPA3   │  Status: ● Connected       │
+│                                            │                            │
+│                                            │  ─── Connection History ─── │
+│                                            │  Last: 2h ago              │
+│                                            │  Times connected: 12       │
+│                                            │                            │
+│                                            │  ─── Speed Test ───        │
+│                                            │  ↓ 45.2 Mbps  ↑ 12.8 Mbps │
+│                                            │                            │
+│                                            │  ─── IP Addresses ───      │
+│                                            │  Local: 192.168.1.42       │
+│                                            │  Public: 73.162.89.201     │
+├────────────────────────────────────────────┴────────────────────────────┤
+│ ↑↓ Nav │ Enter Connect │ r Scan │ s Sort │ ? Help │ q Quit              │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Requirements
@@ -59,17 +72,23 @@ cargo run --release
 ### Quick Start
 
 ```bash
-# Run with default settings (auto-refresh every 5 seconds)
-cargo run
+# Run with default settings (auto-refresh every 15 seconds)
+cargo run --release
 
 # Run in manual mode (scan only when pressing 'r')
-cargo run -- --manual
+cargo run --release -- --manual
 
 # Run with custom refresh interval
-cargo run -- --interval 10
+cargo run --release -- --interval 30
+
+# Run with a specific location name
+cargo run --release -- --location office
 
 # Run in demo mode (simulated networks for testing)
-cargo run -- --demo
+cargo run --release -- --demo
+
+# Run without database persistence (memory only)
+cargo run --release -- --no-persist
 ```
 
 ## Usage
@@ -80,6 +99,7 @@ cargo run -- --demo
 |-----|--------|
 | `↑` / `k` | Navigate up |
 | `↓` / `j` | Navigate down |
+| `Enter` | Connect to network (or run speed test if already connected) |
 | `r` | Manual refresh/scan |
 | `a` | Toggle auto/manual mode |
 | `s` | Cycle sort order (Score → Signal → Name) |
@@ -87,15 +107,24 @@ cargo run -- --demo
 | `?` | Toggle help overlay |
 | `q` / `Esc` | Quit |
 
+### Connection Dialog
+
+When pressing Enter on a network:
+- **Not connected**: Shows "Connect to [network]?" dialog (Y/N)
+- **Already connected**: Shows "Run speed test?" dialog (Y/N)
+
 ### Command Line Options
 
 ```
 wifi-analyzer [OPTIONS]
 
 Options:
-  -i, --interval <SECONDS>  Auto-refresh interval in seconds [default: 5]
+  -i, --interval <SECONDS>  Auto-refresh interval in seconds [default: 15]
   -m, --manual              Start in manual mode (no auto-refresh)
   -d, --demo                Run with simulated WiFi networks
+  -l, --location <NAME>     Location name for this session (e.g., "office")
+      --db-path <PATH>      Database file path [default: wifi_analyzer.duckdb]
+      --no-persist          Run without database persistence
   -h, --help                Print help
   -V, --version             Print version
 ```
@@ -122,11 +151,16 @@ WiFi networks are scored from 0-100 based on multiple factors, optimized for fin
 
 ```
 src/
-├── main.rs              # Entry point, CLI parsing
+├── main.rs              # Entry point, CLI parsing, event loop
 ├── app.rs               # Application state and logic
+├── lib.rs               # Library exports
 ├── tui.rs               # Terminal setup/teardown
 ├── event.rs             # Keyboard and tick event handling
 ├── theme.rs             # Colors and styling
+├── db.rs                # DuckDB database persistence
+├── connection.rs        # WiFi connection management
+├── speedtest.rs         # Download/upload speed measurement
+├── ip.rs                # Local and public IP detection
 ├── scanner/
 │   ├── mod.rs           # Network types and exports
 │   └── platform.rs      # Platform-specific WiFi scanning
@@ -138,23 +172,47 @@ src/
     ├── network_table.rs # Network list widget
     ├── detail_panel.rs  # Selected network details
     ├── signal_chart.rs  # Signal history sparkline
-    └── status_bar.rs    # Mode and keybind hints
+    ├── status_bar.rs    # Mode, timers, and keybind hints
+    ├── popup.rs         # Modal dialog component
+    └── help_overlay.rs  # Help screen
+
+scripts/
+├── wifi_scan.swift      # CoreWLAN WiFi scanner
+└── wifi_connect.swift   # CoreWLAN WiFi connector
 ```
 
 ## How It Works
 
 ### WiFi Scanning (macOS)
 
-On modern macOS (Sonoma+), the app uses a Swift helper script (`scripts/wifi_scan.swift`) that leverages Apple's CoreWLAN framework for WiFi scanning. This provides:
+On modern macOS (Sonoma+), the app uses Swift helper scripts that leverage Apple's CoreWLAN framework for WiFi scanning. This provides:
 
-- Full network discovery (not just the connected network)
+- Full network discovery with multi-pass scanning
 - Accurate signal strength in dBm
 - Security type detection (Open, WEP, WPA, WPA2, WPA3)
 - Channel and frequency band information
+- Current connection detection
 
-### Fallback Scanning
+### Connection Management
 
-On older macOS versions or other platforms, the app falls back to the `wifiscanner` crate, which may have platform-specific limitations.
+Connecting to WiFi networks on modern macOS requires special app entitlements. The app:
+1. First attempts connection via CoreWLAN/networksetup
+2. If that fails (common on macOS Sonoma+), opens System WiFi Settings for manual connection
+
+### Speed Test
+
+Speed tests use Cloudflare's speed test servers:
+- Downloads for ~5 seconds to measure download speed
+- Uploads for ~5 seconds to measure upload speed
+- Results stored in database for history tracking
+
+### Database
+
+Network data is persisted using DuckDB:
+- **networks**: Discovered networks with signal history
+- **connections**: Connection events with timestamps and IPs
+- **locations**: Named scanning locations
+- **known_networks**: Imported from macOS keychain
 
 ## Troubleshooting
 
@@ -169,11 +227,15 @@ Make sure you have Swift installed (comes with Xcode or Command Line Tools):
 xcode-select --install
 ```
 
+### Connection fails / Opens System Settings
+
+On modern macOS (Sonoma+), command-line WiFi connection is restricted. The app will open System WiFi Settings for you to connect manually.
+
 ### Empty network list
 
 Try running with `--demo` flag to verify the TUI works:
 ```bash
-cargo run -- --demo
+cargo run --release -- --demo
 ```
 
 If demo mode works but real scanning doesn't, check your macOS privacy settings for Location Services (required for WiFi scanning on some versions).
@@ -201,6 +263,9 @@ cargo fmt
 - [tokio](https://crates.io/crates/tokio) - Async runtime
 - [clap](https://crates.io/crates/clap) - Command line argument parsing
 - [color-eyre](https://crates.io/crates/color-eyre) - Error handling
+- [duckdb](https://crates.io/crates/duckdb) - Embedded analytics database
+- [reqwest](https://crates.io/crates/reqwest) - HTTP client for speed tests
+- [local-ip-address](https://crates.io/crates/local-ip-address) - Local IP detection
 - [wifiscanner](https://crates.io/crates/wifiscanner) - WiFi scanning (fallback)
 
 ## License
@@ -221,3 +286,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 - [Ratatui](https://ratatui.rs/) for the excellent TUI framework
 - Apple's CoreWLAN framework for WiFi scanning capabilities
+- [Cloudflare](https://speed.cloudflare.com/) for speed test infrastructure

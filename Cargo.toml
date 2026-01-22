@@ -14,3 +14,8 @@ tokio = { version = "1", features = ["full"] }
 wifiscanner = "0.5"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
+duckdb = { version = "1.1", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["blocking"] }
+plist = "1.7"
+local-ip-address = "0.6"

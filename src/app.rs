@@ -1,6 +1,11 @@
 use crate::components::{Component, DetailPanel, NetworkTable, SignalChart, StatusBar};
-use crate::scanner::{scan_networks, Network};
+use crate::connection::{connect_to_network, get_current_connection, import_known_networks};
+use crate::db::{ConnectionRecord, Database, ScanResultRecord};
+use crate::ip::get_all_ips;
+use crate::scanner::{get_scan_detected_connection, scan_networks, FrequencyBand, Network, SecurityType};
 use crate::scoring::calculate_all_scores;
+use crate::speedtest::{run_speed_test, SpeedTestResult};
+use chrono::Utc;
 use color_eyre::Result;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
@@ -25,6 +30,7 @@ pub enum SortField {
 pub struct App {
     pub networks: Vec<Network>,
     pub selected_index: usize,
+    /// Signal history keyed by BSSID (MAC address)
     pub signal_history: HashMap<String, VecDeque<i32>>,
     pub scan_mode: ScanMode,
     pub auto_interval: Duration,
@@ -34,6 +40,36 @@ pub struct App {
     pub should_quit: bool,
     pub show_help: bool,
     pub error_message: Option<String>,
+    /// Database connection (None if persistence disabled)
+    pub db: Option<Database>,
+    /// Current location ID for persistence
+    pub current_location_id: Option<i64>,
+    /// Current location name for display
+    pub current_location_name: Option<String>,
+    /// BSSID of currently connected network (None if not connected)
+    pub connected_bssid: Option<String>,
+    /// SSID of currently connected network
+    pub connected_ssid: Option<String>,
+    /// Show connection confirmation popup
+    pub show_connect_popup: bool,
+    /// Show speed test confirmation popup (for connected network)
+    pub show_speedtest_popup: bool,
+    /// Status message (shown in status bar)
+    pub status_message: Option<String>,
+    /// Connection history cache for selected network
+    pub cached_connection_history: Option<(String, Vec<ConnectionRecord>)>,
+    /// Cached speed test result for selected network
+    pub cached_speed_test: Option<(String, SpeedTestResult)>,
+    /// Cached recent IPs for selected network
+    pub cached_recent_ips: Option<(String, Vec<String>)>,
+    /// Current local IP address (for connected network)
+    pub current_local_ip: Option<String>,
+    /// Current public IP address (for connected network)
+    pub current_public_ip: Option<String>,
+    /// Speed test running in background (network MAC, start time)
+    pub speedtest_running: Option<(String, Instant)>,
+    /// Channel to receive speed test result
+    pub speedtest_receiver: Option<std::sync::mpsc::Receiver<SpeedTestResult>>,
 }
 
 impl App {
@@ -54,7 +90,520 @@ impl App {
             should_quit: false,
             show_help: false,
             error_message: None,
+            db: None,
+            current_location_id: None,
+            current_location_name: None,
+            connected_bssid: None,
+            connected_ssid: None,
+            show_connect_popup: false,
+            show_speedtest_popup: false,
+            status_message: None,
+            cached_connection_history: None,
+            cached_speed_test: None,
+            cached_recent_ips: None,
+            current_local_ip: None,
+            current_public_ip: None,
+            speedtest_running: None,
+            speedtest_receiver: None,
         }
+    }
+
+    /// Configure the app with database persistence
+    pub fn with_database(mut self, db: Database, location_id: i64, location_name: String) -> Self {
+        self.db = Some(db);
+        self.current_location_id = Some(location_id);
+        self.current_location_name = Some(location_name);
+        self
+    }
+
+    /// Load existing networks from the database for the current location
+    pub fn load_networks_from_db(&mut self) -> Result<()> {
+        if let (Some(db), Some(location_id)) = (&self.db, self.current_location_id) {
+            let loaded = db.load_networks_for_location(location_id)?;
+
+            for ln in loaded {
+                let network = Network {
+                    ssid: ln.ssid,
+                    mac: ln.bssid,
+                    channel: ln.channel,
+                    signal_dbm: ln.signal_dbm,
+                    security: SecurityType::from_str(&ln.security),
+                    frequency_band: FrequencyBand::from_str(&ln.frequency_band),
+                    score: ln.score,
+                    last_seen: ln.last_seen,
+                };
+
+                // Add to networks (keyed by MAC for dedup)
+                if let Some(existing) = self.networks.iter_mut().find(|n| n.mac == network.mac) {
+                    // Update existing if loaded data is newer
+                    if network.last_seen > existing.last_seen {
+                        *existing = network;
+                    }
+                } else {
+                    self.networks.push(network);
+                }
+            }
+
+            self.sort_networks();
+        }
+        Ok(())
+    }
+
+    /// Initialize connection state on startup (fast - no network calls)
+    pub fn init_connection_state(&mut self) -> Result<()> {
+        // Detect current WiFi connection
+        self.refresh_current_connection()?;
+
+        // Get local IP immediately (fast, no network call)
+        if self.connected_ssid.is_some() {
+            self.current_local_ip = crate::ip::get_local_ip().ok();
+            // Public IP will be fetched lazily when viewing detail panel
+        }
+
+        // Import known networks from plist (if database available)
+        if let Some(db) = &self.db {
+            // Only import if we haven't imported before
+            let count = db.get_known_networks_count()?;
+            if count == 0 {
+                let imported = import_known_networks(db)?;
+                if imported > 0 {
+                    self.status_message = Some(format!("Imported {} known networks", imported));
+                }
+            }
+        }
+
+        // Load connection data for the initially selected network
+        self.load_selected_network_data();
+
+        Ok(())
+    }
+
+    /// Fetch public IP lazily (called when viewing connected network details)
+    pub fn fetch_public_ip_if_needed(&mut self) {
+        // Only fetch if connected and we don't have it yet
+        if self.connected_ssid.is_some() && self.current_public_ip.is_none() {
+            self.current_public_ip = crate::ip::get_public_ip();
+        }
+    }
+
+    /// Refresh the current connection status
+    pub fn refresh_current_connection(&mut self) -> Result<()> {
+        // Method 1: Use connection info detected during scan (most reliable on modern macOS)
+        if let Some(scan_conn) = get_scan_detected_connection() {
+            self.connected_ssid = Some(scan_conn.ssid);
+            self.connected_bssid = scan_conn.bssid;
+            return Ok(());
+        }
+
+        // Method 2: Try system APIs (works on older macOS)
+        match get_current_connection() {
+            Ok(Some(conn)) => {
+                self.connected_ssid = Some(conn.ssid);
+                self.connected_bssid = conn.bssid;
+            }
+            Ok(None) => {
+                // Couldn't determine SSID via system APIs (macOS privacy restrictions)
+                // Try to detect by checking which network we're likely connected to
+                self.detect_connected_by_signal();
+            }
+            Err(_) => {
+                // Silently ignore connection detection errors
+                self.detect_connected_by_signal();
+            }
+        }
+        Ok(())
+    }
+
+    /// Try to detect connected network using channel from system_profiler
+    /// On modern macOS, we may not be able to get SSID directly due to privacy restrictions
+    fn detect_connected_by_signal(&mut self) {
+        // Check if we have an IP (indicating we're connected to something)
+        if let Ok(output) = std::process::Command::new("ipconfig")
+            .args(["getifaddr", "en0"])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&output.stdout);
+            if ip.trim().is_empty() {
+                // No IP, not connected
+                self.connected_ssid = None;
+                self.connected_bssid = None;
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // Method 1: Get current channel from system_profiler and match
+        if let Some(channel) = get_current_channel() {
+            // Find the network on this channel with the strongest signal
+            if let Some(network) = self.networks.iter()
+                .filter(|n| n.channel as u32 == channel)
+                .max_by_key(|n| n.signal_dbm)
+            {
+                self.connected_ssid = Some(network.ssid.clone());
+                self.connected_bssid = Some(network.mac.clone());
+                return;
+            }
+        }
+
+        // Method 2: Find the network with the strongest signal (> -45 dBm typically means connected)
+        if let Some(strongest) = self.networks.iter()
+            .filter(|n| n.signal_dbm > -45) // Very strong signal indicates connected
+            .max_by_key(|n| n.signal_dbm)
+        {
+            self.connected_ssid = Some(strongest.ssid.clone());
+            self.connected_bssid = Some(strongest.mac.clone());
+        }
+    }
+
+    /// Check if a network is the currently connected one
+    pub fn is_connected(&self, network: &Network) -> bool {
+        // First try SSID match (if we have it)
+        if let Some(ref ssid) = self.connected_ssid {
+            if network.ssid == *ssid {
+                return true;
+            }
+        }
+
+        // Try BSSID match (exact or prefix match for router MAC)
+        if let Some(ref bssid) = self.connected_bssid {
+            let network_mac = network.mac.to_uppercase();
+            let connected_mac = bssid.to_uppercase();
+
+            // Exact match
+            if network_mac == connected_mac {
+                return true;
+            }
+
+            // Prefix match (first 5 octets) - router MAC and AP BSSID often share prefix
+            // e.g., router MAC c8:7f:54:bf:29:1c and BSSID c8:7f:54:bf:29:1d
+            if network_mac.len() >= 14 && connected_mac.len() >= 14 {
+                let network_prefix = &network_mac[..14]; // First 5 octets (14 chars with colons)
+                let connected_prefix = &connected_mac[..14];
+                if network_prefix == connected_prefix {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if a network is known (previously connected)
+    pub fn is_known_network(&self, ssid: &str) -> bool {
+        if let Some(ref db) = self.db {
+            db.is_known_network(ssid).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Show the connection confirmation popup (or speed test popup if connected)
+    pub fn show_connect_dialog(&mut self) {
+        if self.networks.is_empty() {
+            return;
+        }
+
+        let network = &self.networks[self.selected_index];
+
+        // Check if already connected - offer speed test instead
+        if self.is_connected(network) {
+            self.show_speedtest_popup = true;
+            return;
+        }
+
+        self.show_connect_popup = true;
+    }
+
+    /// Cancel the connection popup
+    pub fn cancel_connect_dialog(&mut self) {
+        self.show_connect_popup = false;
+    }
+
+    /// Cancel the speed test popup
+    pub fn cancel_speedtest_dialog(&mut self) {
+        self.show_speedtest_popup = false;
+    }
+
+    /// Start speed test in background on currently connected network
+    pub fn confirm_speedtest(&mut self) -> Result<()> {
+        self.show_speedtest_popup = false;
+
+        if self.networks.is_empty() {
+            return Ok(());
+        }
+
+        let network = self.networks[self.selected_index].clone();
+
+        // Create channel for result
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Store start time and receiver
+        self.speedtest_running = Some((network.mac.clone(), Instant::now()));
+        self.speedtest_receiver = Some(rx);
+
+        // Spawn background thread for speed test
+        std::thread::spawn(move || {
+            if let Ok(result) = run_speed_test() {
+                let _ = tx.send(result);
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Check if background speed test has completed
+    pub fn check_speedtest_result(&mut self) {
+        // Check if we have a pending result
+        if let Some(ref rx) = self.speedtest_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    // Speed test completed!
+                    if let Some((ref mac, _)) = self.speedtest_running {
+                        let mac = mac.clone();
+
+                        // Store in database if available
+                        if let Some(ref db) = self.db {
+                            if let Ok(Some(network_id)) = db.get_network_id_by_bssid(&mac) {
+                                let _ = db.insert_connection(
+                                    network_id,
+                                    self.current_local_ip.as_deref(),
+                                    self.current_public_ip.as_deref(),
+                                    Some(result.download_mbps),
+                                    Some(result.upload_mbps),
+                                );
+                            }
+                        }
+
+                        // Cache and display the result
+                        self.cached_speed_test = Some((mac, result.clone()));
+                        self.status_message = Some(format!(
+                            "Speed test complete: ↓{:.1} Mbps  ↑{:.1} Mbps",
+                            result.download_mbps, result.upload_mbps
+                        ));
+
+                        // Refresh connection history cache
+                        self.clear_connection_cache();
+                        self.load_selected_network_data();
+                    }
+
+                    // Clear running state
+                    self.speedtest_running = None;
+                    self.speedtest_receiver = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still running - nothing to do
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Thread died without sending result
+                    self.status_message = Some("Speed test failed".to_string());
+                    self.speedtest_running = None;
+                    self.speedtest_receiver = None;
+                }
+            }
+        }
+    }
+
+    /// Get speed test progress message if running
+    pub fn get_speedtest_status(&self) -> Option<String> {
+        if let Some((_, start_time)) = &self.speedtest_running {
+            let elapsed = start_time.elapsed().as_secs();
+            if elapsed < 5 {
+                Some(format!("Speed test: downloading... {}s", elapsed))
+            } else {
+                Some(format!("Speed test: uploading... {}s", elapsed.saturating_sub(5)))
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get time until next auto-refresh
+    pub fn get_next_refresh_secs(&self) -> Option<u64> {
+        if matches!(self.scan_mode, ScanMode::Auto) && !self.is_scanning {
+            let elapsed = self.last_scan.elapsed();
+            if elapsed < self.auto_interval {
+                Some((self.auto_interval - elapsed).as_secs())
+            } else {
+                Some(0)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Execute the connection (dialog already dismissed by caller)
+    pub fn do_connect(&mut self) -> Result<()> {
+        if self.networks.is_empty() {
+            return Ok(());
+        }
+
+        let network = self.networks[self.selected_index].clone();
+
+        // Try command-line connection first
+        match connect_to_network(&network.ssid) {
+            Ok(true) => {
+                // Connection verified - refresh state and gather stats
+                self.refresh_current_connection()?;
+                self.on_connect_success(&network)?;
+            }
+            Ok(false) => {
+                // Command-line connection failed - open System Settings
+                self.status_message = Some(format!(
+                    "Opening WiFi Settings - please connect to {} manually",
+                    network.ssid
+                ));
+                // Open WiFi settings pane
+                let _ = std::process::Command::new("open")
+                    .arg("x-apple.systempreferences:com.apple.wifi-settings-extension")
+                    .spawn();
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Connection error: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Legacy method for compatibility
+    pub fn confirm_connect(&mut self) -> Result<()> {
+        self.show_connect_popup = false;
+        self.do_connect()
+    }
+
+    /// Called after successful connection - gather IPs, run speed test, persist
+    fn on_connect_success(&mut self, network: &Network) -> Result<()> {
+        self.status_message = Some(format!("Connected to {}! Gathering stats...", network.ssid));
+
+        // Get IPs
+        let (local_ip, public_ip) = get_all_ips();
+
+        // Run speed test
+        self.status_message = Some("Running speed test...".to_string());
+        let speed_result = run_speed_test().ok();
+
+        // Persist connection to database
+        if let Some(ref db) = self.db {
+            if let Some(network_id) = db.get_network_id_by_bssid(&network.mac)? {
+                let (download, upload) = speed_result
+                    .as_ref()
+                    .map(|r| (Some(r.download_mbps), Some(r.upload_mbps)))
+                    .unwrap_or((None, None));
+
+                db.insert_connection(
+                    network_id,
+                    local_ip.as_deref(),
+                    public_ip.as_deref(),
+                    download,
+                    upload,
+                )?;
+
+                // Cache the speed test result
+                if let Some(result) = speed_result {
+                    self.cached_speed_test = Some((network.mac.clone(), result.clone()));
+                    self.status_message = Some(format!(
+                        "Connected! ↓{:.1} Mbps ↑{:.1} Mbps",
+                        result.download_mbps, result.upload_mbps
+                    ));
+                } else {
+                    self.status_message = Some(format!("Connected to {}", network.ssid));
+                }
+            }
+        } else {
+            self.status_message = Some(format!("Connected to {}", network.ssid));
+        }
+
+        Ok(())
+    }
+
+    /// Get connection history for a network (cached)
+    pub fn get_connection_history(&mut self, bssid: &str) -> Option<&Vec<ConnectionRecord>> {
+        // Check if we have cached data for this network
+        if let Some((cached_bssid, _)) = &self.cached_connection_history {
+            if cached_bssid == bssid {
+                return self.cached_connection_history.as_ref().map(|(_, v)| v);
+            }
+        }
+
+        // Load from database
+        if let Some(ref db) = self.db {
+            if let Ok(Some(network_id)) = db.get_network_id_by_bssid(bssid) {
+                if let Ok(history) = db.get_connection_history(network_id, 10) {
+                    self.cached_connection_history = Some((bssid.to_string(), history));
+                    return self.cached_connection_history.as_ref().map(|(_, v)| v);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get connection count for a network
+    pub fn get_connection_count(&self, bssid: &str) -> Option<i64> {
+        if let Some(ref db) = self.db {
+            if let Ok(Some(network_id)) = db.get_network_id_by_bssid(bssid) {
+                return db.get_connection_count(network_id).ok();
+            }
+        }
+        None
+    }
+
+    /// Get recent IPs for a network (cached)
+    pub fn get_recent_ips(&mut self, bssid: &str) -> Option<&Vec<String>> {
+        // Check cache
+        if let Some((cached_bssid, _)) = &self.cached_recent_ips {
+            if cached_bssid == bssid {
+                return self.cached_recent_ips.as_ref().map(|(_, v)| v);
+            }
+        }
+
+        // Load from database
+        if let Some(ref db) = self.db {
+            if let Ok(Some(network_id)) = db.get_network_id_by_bssid(bssid) {
+                if let Ok(ips) = db.get_recent_ips(network_id, 5) {
+                    self.cached_recent_ips = Some((bssid.to_string(), ips));
+                    return self.cached_recent_ips.as_ref().map(|(_, v)| v);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Clear cached connection data (call when selection changes)
+    pub fn clear_connection_cache(&mut self) {
+        self.cached_connection_history = None;
+        self.cached_speed_test = None;
+        self.cached_recent_ips = None;
+    }
+
+    /// Load connection data for the currently selected network
+    pub fn load_selected_network_data(&mut self) {
+        if let Some(network) = self.networks.get(self.selected_index) {
+            let bssid = network.mac.clone();
+            let is_connected = self.is_connected(network);
+
+            // Load connection history (this also populates the cache)
+            let _ = self.get_connection_history(&bssid);
+            // Load recent IPs
+            let _ = self.get_recent_ips(&bssid);
+
+            // If viewing the connected network, fetch public IP lazily
+            if is_connected {
+                self.fetch_public_ip_if_needed();
+            }
+        }
+    }
+
+    /// Set status message
+    pub fn set_status(&mut self, msg: String) {
+        self.status_message = Some(msg);
+    }
+
+    /// Clear status message
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -68,12 +617,16 @@ impl App {
     pub fn navigate_up(&mut self) {
         if !self.networks.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
+            self.clear_connection_cache();
+            self.load_selected_network_data();
         }
     }
 
     pub fn navigate_down(&mut self) {
         if !self.networks.is_empty() && self.selected_index < self.networks.len() - 1 {
             self.selected_index += 1;
+            self.clear_connection_cache();
+            self.load_selected_network_data();
         }
     }
 
@@ -119,14 +672,22 @@ impl App {
 
     pub async fn perform_scan(&mut self) -> Result<()> {
         self.is_scanning = true;
-        let mut networks = scan_networks().await?;
-        calculate_all_scores(&mut networks);
+        let mut scanned_networks = scan_networks().await?;
+        calculate_all_scores(&mut scanned_networks);
 
-        // Update signal history
-        for network in &networks {
+        // Persist to database if available
+        if let (Some(db), Some(location_id)) = (&self.db, self.current_location_id)
+            && let Err(e) = self.persist_scan_results(db, location_id, &scanned_networks)
+        {
+            // Log error but don't fail the scan
+            eprintln!("Failed to persist scan: {}", e);
+        }
+
+        // Update signal history (keyed by BSSID/MAC address for uniqueness)
+        for network in &scanned_networks {
             let history = self
                 .signal_history
-                .entry(network.ssid.clone())
+                .entry(network.mac.clone())
                 .or_default();
             history.push_back(network.signal_dbm);
             while history.len() > SIGNAL_HISTORY_SIZE {
@@ -134,15 +695,34 @@ impl App {
             }
         }
 
-        // Preserve selection if possible
-        let selected_ssid = self.networks.get(self.selected_index).map(|n| n.ssid.clone());
+        // Preserve selection if possible (by MAC address for stability)
+        let selected_mac = self.networks.get(self.selected_index).map(|n| n.mac.clone());
 
-        self.networks = networks;
+        // Merge scanned networks with existing (accumulate, don't replace)
+        let now = Utc::now();
+        for scanned in scanned_networks {
+            if let Some(existing) = self.networks.iter_mut().find(|n| n.mac == scanned.mac) {
+                // Update existing network with new scan data
+                existing.ssid = scanned.ssid;
+                existing.channel = scanned.channel;
+                existing.signal_dbm = scanned.signal_dbm;
+                existing.security = scanned.security;
+                existing.frequency_band = scanned.frequency_band;
+                existing.score = scanned.score;
+                existing.last_seen = now;
+            } else {
+                // Add new network
+                let mut network = scanned;
+                network.last_seen = now;
+                self.networks.push(network);
+            }
+        }
+
         self.sort_networks();
 
-        // Try to maintain selection
-        if let Some(ssid) = selected_ssid
-            && let Some(idx) = self.networks.iter().position(|n| n.ssid == ssid)
+        // Try to maintain selection by MAC address
+        if let Some(mac) = selected_mac
+            && let Some(idx) = self.networks.iter().position(|n| n.mac == mac)
         {
             self.selected_index = idx;
         }
@@ -157,6 +737,35 @@ impl App {
         self.last_scan = Instant::now();
         self.is_scanning = false;
 
+        // Load connection data for the selected network
+        self.load_selected_network_data();
+
+        Ok(())
+    }
+
+    /// Persist scan results to the database
+    fn persist_scan_results(
+        &self,
+        db: &Database,
+        location_id: i64,
+        networks: &[Network],
+    ) -> Result<()> {
+        let scan_id = db.create_scan(location_id)?;
+
+        let records: Vec<ScanResultRecord> = networks
+            .iter()
+            .map(|n| ScanResultRecord {
+                bssid: n.mac.clone(),
+                ssid: n.ssid.clone(),
+                channel: n.channel,
+                signal_dbm: n.signal_dbm,
+                security: format!("{:?}", n.security),
+                frequency_band: format!("{:?}", n.frequency_band),
+                score: n.score,
+            })
+            .collect();
+
+        db.record_scan_results(scan_id, &records)?;
         Ok(())
     }
 
@@ -207,10 +816,108 @@ impl App {
             self.render_help_overlay(frame);
         }
 
+        // Connect popup
+        if self.show_connect_popup {
+            self.render_connect_popup(frame);
+        }
+
+        // Speed test popup
+        if self.show_speedtest_popup {
+            self.render_speedtest_popup(frame);
+        }
+
         // Error overlay
         if let Some(ref error) = self.error_message {
             self.render_error_overlay(frame, error);
         }
+    }
+
+    fn render_connect_popup(&self, frame: &mut Frame) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = centered_rect(40, 25, frame.area());
+
+        let ssid = self
+            .networks
+            .get(self.selected_index)
+            .map(|n| n.ssid.as_str())
+            .unwrap_or("Unknown");
+
+        let popup_text = vec![
+            Line::from(""),
+            Line::from(format!("Connect to \"{}\"?", ssid)),
+            Line::from(""),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("[Y]", Style::default().fg(Color::Green)),
+                Span::raw("es    "),
+                Span::styled("[N]", Style::default().fg(Color::Red)),
+                Span::raw("o"),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(popup_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(Span::styled(
+                        " Connect to Network? ",
+                        Style::default().fg(Color::Cyan),
+                    )),
+            )
+            .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_speedtest_popup(&self, frame: &mut Frame) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = centered_rect(45, 30, frame.area());
+
+        let ssid = self
+            .networks
+            .get(self.selected_index)
+            .map(|n| n.ssid.as_str())
+            .unwrap_or("Unknown");
+
+        let popup_text = vec![
+            Line::from(""),
+            Line::from(format!("Run speed test on \"{}\"?", ssid)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "(~10 seconds: 5s download + 5s upload)",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("[Y]", Style::default().fg(Color::Green)),
+                Span::raw("es    "),
+                Span::styled("[N]", Style::default().fg(Color::Red)),
+                Span::raw("o"),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(popup_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(Span::styled(
+                        " Speed Test? ",
+                        Style::default().fg(Color::Yellow),
+                    )),
+            )
+            .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(paragraph, area);
     }
 
     fn render_error_overlay(&self, frame: &mut Frame, error: &str) {
@@ -280,6 +987,7 @@ impl App {
             Line::from(Span::styled("Keyboard Shortcuts", Theme::title_style())),
             Line::from(""),
             Line::from("\u{2191}/\u{2193} or j/k   Navigate networks"),
+            Line::from("Enter          Connect to network"),
             Line::from("r              Refresh scan"),
             Line::from("a              Toggle auto/manual mode"),
             Line::from("s              Cycle sort order"),
@@ -338,4 +1046,42 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Get the current WiFi channel from system_profiler
+fn get_current_channel() -> Option<u32> {
+    let output = std::process::Command::new("system_profiler")
+        .args(["SPAirPortDataType"])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut in_current_network = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("Current Network Information:") {
+            in_current_network = true;
+            continue;
+        }
+
+        if in_current_network && trimmed.starts_with("Channel:") {
+            // Parse "Channel: 37 (6GHz, 160MHz)" format
+            let channel_part = trimmed.strip_prefix("Channel:")?.trim();
+            let channel_num = channel_part
+                .split_whitespace()
+                .next()?
+                .parse::<u32>()
+                .ok()?;
+            return Some(channel_num);
+        }
+
+        // Stop if we've moved past the current network section
+        if in_current_network && (trimmed.starts_with("Other Local") || trimmed.is_empty() && line.len() < 10) {
+            break;
+        }
+    }
+
+    None
 }

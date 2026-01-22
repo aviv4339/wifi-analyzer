@@ -84,4 +84,21 @@ impl Theme {
         };
         Style::default().fg(color)
     }
+
+    /// Style for connected network indicator
+    pub fn connected_style() -> Style {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Style for known network indicator
+    pub fn known_style() -> Style {
+        Style::default().fg(Color::DarkGray)
+    }
+
+    /// Style for status message
+    pub fn status_style() -> Style {
+        Style::default().fg(Color::Cyan)
+    }
 }

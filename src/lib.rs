@@ -1,7 +1,11 @@
 pub mod app;
 pub mod components;
+pub mod connection;
+pub mod db;
 pub mod event;
+pub mod ip;
 pub mod scanner;
 pub mod scoring;
+pub mod speedtest;
 pub mod theme;
 pub mod tui;

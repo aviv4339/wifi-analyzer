@@ -1,7 +1,8 @@
 mod platform;
 
-pub use platform::{enable_demo_mode, is_demo_mode, scan_networks};
+pub use platform::{enable_demo_mode, get_scan_detected_connection, is_demo_mode, scan_networks, CurrentConnectionInfo};
 
+use chrono::{DateTime, Utc};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,20 @@ impl fmt::Display for SecurityType {
             SecurityType::WPA2 => write!(f, "WPA2"),
             SecurityType::WPA3 => write!(f, "WPA3"),
             SecurityType::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+impl SecurityType {
+    /// Parse from debug/display string (stored in DB)
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Open" => SecurityType::Open,
+            "WEP" => SecurityType::WEP,
+            "WPA" => SecurityType::WPA,
+            "WPA2" => SecurityType::WPA2,
+            "WPA3" => SecurityType::WPA3,
+            _ => SecurityType::Unknown,
         }
     }
 }
@@ -56,6 +71,16 @@ impl FrequencyBand {
             _ => FrequencyBand::Unknown,
         }
     }
+
+    /// Parse from debug string (stored in DB)
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Band2_4GHz" => FrequencyBand::Band2_4GHz,
+            "Band5GHz" => FrequencyBand::Band5GHz,
+            "Band6GHz" => FrequencyBand::Band6GHz,
+            _ => FrequencyBand::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +92,7 @@ pub struct Network {
     pub security: SecurityType,
     pub frequency_band: FrequencyBand,
     pub score: u8,
+    pub last_seen: DateTime<Utc>,
 }
 
 impl Network {

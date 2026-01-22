@@ -11,7 +11,8 @@ pub struct SignalChart;
 impl Component for SignalChart {
     fn render(&self, frame: &mut Frame, area: Rect, app: &App) {
         let data: Vec<u64> = if let Some(network) = app.networks.get(app.selected_index) {
-            if let Some(history) = app.signal_history.get(&network.ssid) {
+            // Use MAC address (BSSID) as the key for signal history
+            if let Some(history) = app.signal_history.get(&network.mac) {
                 // Convert dBm to positive values for sparkline (0-100 scale)
                 // -30 dBm = 100, -90 dBm = 0
                 history

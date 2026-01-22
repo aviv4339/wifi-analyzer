@@ -1,5 +1,6 @@
 //! Test binary to verify core functionality without TUI
 
+use chrono::Utc;
 use std::time::Duration;
 use wifi_analyzer::app::{App, ScanMode, SortField};
 use wifi_analyzer::scanner::{enable_demo_mode, scan_networks, FrequencyBand, Network, SecurityType};
@@ -52,6 +53,7 @@ async fn main() {
             security: SecurityType::Open,
             frequency_band: FrequencyBand::Band5GHz,
             score: 0,
+            last_seen: Utc::now(),
         },
         Network {
             ssid: "WeakSecured24".to_string(),
@@ -61,6 +63,7 @@ async fn main() {
             security: SecurityType::WPA2,
             frequency_band: FrequencyBand::Band2_4GHz,
             score: 0,
+            last_seen: Utc::now(),
         },
         Network {
             ssid: "MediumOpen".to_string(),
@@ -70,6 +73,7 @@ async fn main() {
             security: SecurityType::Open,
             frequency_band: FrequencyBand::Band2_4GHz,
             score: 0,
+            last_seen: Utc::now(),
         },
     ];
 
@@ -167,6 +171,7 @@ async fn main() {
             security: SecurityType::Open,
             frequency_band: FrequencyBand::Band2_4GHz,
             score: 0,
+            last_seen: Utc::now(),
         };
         let bars = net.signal_bars();
         let filled_count = bars.chars().filter(|c| *c == '▓').count();

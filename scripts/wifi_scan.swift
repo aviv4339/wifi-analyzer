@@ -9,6 +9,13 @@ guard let interface = CWWiFiClient.shared().interface() else {
     exit(1)
 }
 
+// First, output current connection info (if connected)
+// Format: CONNECTED|SSID|BSSID
+if let currentSSID = interface.ssid() {
+    let currentBSSID = interface.bssid() ?? ""
+    print("CONNECTED|\(currentSSID)|\(currentBSSID)")
+}
+
 // Perform a scan
 do {
     let networks = try interface.scanForNetworks(withSSID: nil)

@@ -2,6 +2,7 @@ use crate::app::{App, SortField};
 use crate::components::Component;
 use crate::scanner::SecurityType;
 use crate::theme::Theme;
+use chrono::Utc;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,15 +19,32 @@ impl Component for NetworkTable {
             header_cell("Score", app.sort_by == SortField::Score),
             header_cell("Security", false),
             header_cell("Channel", false),
+            header_cell("Last Seen", false),
         ];
 
         let header = Row::new(header_cells).style(Theme::header_style()).height(1);
 
         let rows = app.networks.iter().enumerate().map(|(idx, network)| {
             let is_selected = idx == app.selected_index;
-            let indicator = if is_selected { "\u{25b6} " } else { "  " };
+            let is_connected = app.is_connected(network);
 
-            let ssid_cell = Cell::from(format!("{}{}", indicator, truncate(&network.ssid, 20)));
+            // Selection indicator
+            let select_indicator = if is_selected { "\u{25b6}" } else { " " };
+
+            // Connection indicator: green dot for connected
+            let (connect_indicator, connect_style) = if is_connected {
+                ("\u{25cf}", Theme::connected_style())
+            } else {
+                (" ", Style::default())
+            };
+
+            // Build SSID cell with both indicators
+            let ssid_text = truncate(&network.ssid, 16);
+            let ssid_cell = Cell::from(Line::from(vec![
+                Span::raw(format!("{} ", select_indicator)),
+                Span::styled(connect_indicator, connect_style),
+                Span::raw(format!(" {}", ssid_text)),
+            ]));
 
             let signal_cell = Cell::from(Span::styled(
                 network.signal_bars(),
@@ -47,7 +65,9 @@ impl Component for NetworkTable {
                 network.channel, network.frequency_band
             ));
 
-            let row = Row::new([ssid_cell, signal_cell, score_cell, security_cell, channel_cell]);
+            let last_seen_cell = Cell::from(format_relative_time(network.last_seen));
+
+            let row = Row::new([ssid_cell, signal_cell, score_cell, security_cell, channel_cell, last_seen_cell]);
 
             if is_selected {
                 row.style(Theme::selected_style())
@@ -62,11 +82,12 @@ impl Component for NetworkTable {
         let table = Table::new(
             rows,
             [
-                Constraint::Min(24),       // SSID
+                Constraint::Min(22),       // SSID
                 Constraint::Length(7),     // Signal bars
                 Constraint::Length(5),     // Score
                 Constraint::Length(8),     // Security
-                Constraint::Length(16),    // Channel
+                Constraint::Length(14),    // Channel
+                Constraint::Length(10),    // Last Seen
             ],
         )
         .header(header)
@@ -98,5 +119,26 @@ fn truncate(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..max_len - 3])
     } else {
         s.to_string()
+    }
+}
+
+/// Format a timestamp as relative time (e.g., "2m ago", "1h ago")
+fn format_relative_time(time: chrono::DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(time);
+
+    if duration.num_seconds() < 0 {
+        return "now".to_string();
+    }
+
+    let secs = duration.num_seconds();
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }

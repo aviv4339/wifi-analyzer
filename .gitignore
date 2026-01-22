@@ -44,3 +44,7 @@ lcov.info
 
 # Claude Code
 .claude/
+
+# DuckDB database files
+*.duckdb
+*.duckdb.wal
