@@ -4,6 +4,7 @@ pub mod connection;
 pub mod db;
 pub mod event;
 pub mod ip;
+pub mod network_map;
 pub mod scanner;
 pub mod scoring;
 pub mod speedtest;
