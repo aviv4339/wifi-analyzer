@@ -154,12 +154,23 @@ fn identify_service(port: u16, banner: Option<&str>) -> Option<String> {
 fn detect_agent(port: u16, banner: Option<&str>) -> Option<String> {
     if let Some(banner) = banner {
         let banner_lower = banner.to_lowercase();
+        // Claude-related agents
         if banner_lower.contains("claude") || banner_lower.contains("anthropic") { return Some("Claude Code".to_string()); }
+        if banner_lower.contains("clawdbot") || banner_lower.contains("claw") { return Some("Clawdbot".to_string()); }
+        if banner_lower.contains("moldbot") || banner_lower.contains("mold") { return Some("Moldbot".to_string()); }
+        // LLM servers
         if banner_lower.contains("ollama") { return Some("Ollama".to_string()); }
+        if banner_lower.contains("llama") || banner_lower.contains("ggml") { return Some("Llama.cpp".to_string()); }
+        if banner_lower.contains("openai") { return Some("OpenAI API".to_string()); }
+        if banner_lower.contains("vllm") { return Some("vLLM".to_string()); }
+        if banner_lower.contains("text-generation") { return Some("TGI".to_string()); }
+        // IDE/Editor agents
         if banner_lower.contains("cursor") { return Some("Cursor".to_string()); }
         if banner_lower.contains("aider") { return Some("Aider".to_string()); }
-        if banner_lower.contains("openai") { return Some("OpenAI".to_string()); }
-        if banner_lower.contains("llama") { return Some("Llama.cpp".to_string()); }
+        if banner_lower.contains("continue") { return Some("Continue.dev".to_string()); }
+        if banner_lower.contains("copilot") { return Some("GitHub Copilot".to_string()); }
+        if banner_lower.contains("codeium") { return Some("Codeium".to_string()); }
+        if banner_lower.contains("tabnine") { return Some("TabNine".to_string()); }
     }
     match port {
         11434 => Some("Ollama".to_string()),

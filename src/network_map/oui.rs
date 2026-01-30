@@ -4,17 +4,43 @@ use std::sync::OnceLock;
 /// Lookup vendor name from MAC address prefix (OUI)
 pub fn lookup_vendor(mac: &str) -> Option<&'static str> {
     let oui = get_oui_database();
-    let normalized: String = mac
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .take(6)
-        .collect::<String>()
-        .to_uppercase();
+
+    // Handle MAC addresses that may have single-digit octets (e.g., "0:E0:4C" instead of "00:E0:4C")
+    // Split by common separators and pad each octet
+    let parts: Vec<&str> = mac.split(|c| c == ':' || c == '-' || c == '.').collect();
+    let normalized = if parts.len() >= 3 {
+        // MAC with separators - pad each octet to 2 chars
+        parts.iter()
+            .take(3)
+            .map(|p| format!("{:0>2}", p.to_uppercase()))
+            .collect::<String>()
+    } else {
+        // No separators - just take first 6 hex chars
+        mac.chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(6)
+            .collect::<String>()
+            .to_uppercase()
+    };
 
     if normalized.len() < 6 {
         return None;
     }
-    oui.get(normalized.as_str()).copied()
+
+    // First check the OUI database (before checking for randomized)
+    if let Some(vendor) = oui.get(normalized.as_str()).copied() {
+        return Some(vendor);
+    }
+
+    // Check if locally administered address (second nibble is 2, 6, A, or E)
+    // These are randomized MACs used by phones/laptops for privacy
+    if let Some(second_char) = normalized.chars().nth(1) {
+        if matches!(second_char, '2' | '6' | 'A' | 'E') {
+            return Some("Private/Randomized");
+        }
+    }
+
+    None
 }
 
 fn get_oui_database() -> &'static HashMap<&'static str, &'static str> {
@@ -43,9 +69,25 @@ fn get_oui_database() -> &'static HashMap<&'static str, &'static str> {
             map.insert(prefix, "Intel");
         }
 
-        // Espressif (IoT)
-        for prefix in ["240AC4", "24B2DE", "2C3AE8", "30AEA4", "5CCF7F", "84CCA8", "A4CF12", "ECFABC"] {
+        // Espressif (ESP32/ESP8266 - used by Shelly, Sonoff, Tuya, and many IoT devices)
+        for prefix in [
+            "240AC4", "24B2DE", "2C3AE8", "30AEA4", "5CCF7F", "84CCA8", "A4CF12", "ECFABC",
+            "08B61F", "08F9E0", "10521C", "10914F", "18FE34", "24D7EB", "2462AB", "283734",
+            "2C9114", "2CF432", "2EC8EB", "3010DE", "303A64", "34864A", "34945B", "34AB95",
+            "3C61EC", "3C71BF", "404CCA", "40F520", "44179B", "480FD2", "48E729", "4C11AE",
+            "4C7525", "500291", "5C0133", "5CCF7F", "60019D", "60A5E2", "64A2F9", "64B7B7",
+            "683E34", "68B6B3", "68C63A", "78E36D", "7C87CE", "807D3A", "84F703", "880BC9",
+            "8C4B14", "8C7C92", "8CAAB5", "90380C", "98CDAC", "98F4AB", "A020A6", "A0D4F0",
+            "A4E57C", "A8032A", "AC0BFB", "AC67B2", "B0B21C", "B4E62D", "BC8A8C", "BCDD37",
+            "C45BBE", "C8C9A3", "CC50E3", "D8A01D", "D8BFC0", "D8F15B", "DC4F22", "E0E2E6",
+            "E8DB84", "EC6260", "EC94D3", "F008D1", "F4CFA2", "FC019B", "FCF5C4",
+        ] {
             map.insert(prefix, "Espressif");
+        }
+
+        // Shelly / Allterco (some devices have Allterco-specific OUI)
+        for prefix in ["34945B", "483FDA", "84CCA8", "E8DB84", "EC6260"] {
+            map.insert(prefix, "Shelly");
         }
 
         // Amazon
@@ -53,9 +95,30 @@ fn get_oui_database() -> &'static HashMap<&'static str, &'static str> {
             map.insert(prefix, "Amazon");
         }
 
+        // IANA multicast (01:00:5E is IPv4 multicast)
+        map.insert("01005E", "Multicast");
+
+        // Xiaomi
+        for prefix in ["00EC0A", "0C1DAF", "286C07", "34CE00", "50A728", "64B473", "74D4DD", "78112F", "9C99A0", "AC3743", "F8A45F"] {
+            map.insert(prefix, "Xiaomi");
+        }
+
         // Microsoft
         for prefix in ["001DD8", "0050F2", "28186D", "50579C", "7CB27D", "B483E7", "C83DD4"] {
             map.insert(prefix, "Microsoft");
+        }
+
+        // Realtek (common network chipsets)
+        for prefix in ["00E04C", "00044B", "001F1F", "20CF30", "48E24B", "52540B", "54E1AD", "74DA38",
+                       "801F02", "94DE80", "98541B", "D8EB46", "E04F43", "EC086B"] {
+            map.insert(prefix, "Realtek");
+        }
+
+        // Intel
+        for prefix in ["001111", "001302", "001517", "0016EA", "002314", "00215D", "3413E8", "384697",
+                       "485D36", "5CC5D4", "606720", "645A04", "6C883C", "7C5CF8", "80861F", "848F69",
+                       "94659C", "985FD3", "A0369F", "A4C494", "B8088C", "CC2F71", "DC536C", "E4B97A"] {
+            map.insert(prefix, "Intel");
         }
 
         // TP-Link
