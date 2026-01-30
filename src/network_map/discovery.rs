@@ -9,6 +9,14 @@ use tokio::sync::mpsc;
 pub async fn discover_devices(
     progress_tx: Option<mpsc::Sender<ScanProgress>>,
 ) -> Result<Vec<Device>> {
+    discover_devices_with_options(progress_tx, false).await
+}
+
+/// Discover devices with optional ping sweep
+pub async fn discover_devices_with_options(
+    progress_tx: Option<mpsc::Sender<ScanProgress>>,
+    do_ping_sweep: bool,
+) -> Result<Vec<Device>> {
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(ScanProgress {
             phase: ScanPhase::Discovery,
@@ -19,7 +27,13 @@ pub async fn discover_devices(
         }).await;
     }
 
-    let (local_ip, _subnet) = get_local_network_info()?;
+    let (local_ip, subnet) = get_local_network_info()?;
+
+    // Optional ping sweep to populate ARP cache with all active devices
+    if do_ping_sweep {
+        eprintln!("  Ping sweep on {} (this may take a moment)...", subnet);
+        ping_sweep(&subnet).await?;
+    }
     let mut devices = parse_arp_cache()?;
 
     if let Some(gateway) = get_default_gateway()? {
@@ -142,7 +156,7 @@ fn get_mac_for_ip(ip: &str) -> Option<String> {
     parse_arp_line(&stdout).map(|(_, _, mac)| mac)
 }
 
-#[allow(dead_code)]
+/// Ping all IPs in subnet to populate ARP cache
 pub async fn ping_sweep(subnet: &IpNetwork) -> Result<()> {
     use tokio::process::Command as TokioCommand;
     use tokio::time::{timeout, Duration};

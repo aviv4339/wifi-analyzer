@@ -51,9 +51,16 @@ enum Command {
         /// Show verbose output
         #[arg(short, long)]
         verbose: bool,
+        /// Do full ping sweep to discover all devices (slower but more thorough)
+        #[arg(short, long)]
+        full: bool,
     },
     /// Discover devices on the network (ARP only, no port scan)
-    Discover,
+    Discover {
+        /// Do full ping sweep to discover all devices
+        #[arg(short, long)]
+        full: bool,
+    },
     /// Test port scanning on a specific IP
     ScanPorts {
         /// IP address to scan
@@ -343,16 +350,16 @@ fn prompt_for_location(db: &Database) -> Result<String> {
 /// Run CLI commands (non-TUI mode)
 async fn run_cli_command(cmd: Command) -> Result<()> {
     use wifi_analyzer::network_map::{
-        discover_devices, identify_device, scan_devices_ports,
+        discover_devices, discover_devices_with_options, identify_device, scan_devices_ports,
         Device, ScanPhase, ScanProgress, COMMON_PORTS,
     };
 
     match cmd {
-        Command::ScanDevices { verbose } => {
-            println!("=== Network Device Scanner ===\n");
+        Command::ScanDevices { verbose, full } => {
+            println!("=== Network Device Scanner{} ===\n", if full { " (Full)" } else { "" });
 
             // Phase 1: Discovery
-            println!("[1/3] Discovering devices...");
+            println!("[1/3] Discovering devices{}...", if full { " (with ping sweep)" } else { "" });
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ScanProgress>(10);
 
             // Spawn progress printer
@@ -383,7 +390,7 @@ async fn run_cli_command(cmd: Command) -> Result<()> {
                 }
             });
 
-            let mut devices = match discover_devices(Some(progress_tx.clone())).await {
+            let mut devices = match discover_devices_with_options(Some(progress_tx.clone()), full).await {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Discovery error: {}", e);
@@ -482,10 +489,10 @@ async fn run_cli_command(cmd: Command) -> Result<()> {
             println!("\nTotal: {} devices", devices.len());
         }
 
-        Command::Discover => {
-            println!("=== Device Discovery (ARP only) ===\n");
+        Command::Discover { full } => {
+            println!("=== Device Discovery{} ===\n", if full { " (Full Sweep)" } else { " (ARP only)" });
 
-            let devices = match discover_devices(None).await {
+            let devices = match discover_devices_with_options(None, full).await {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Discovery error: {}", e);
@@ -495,11 +502,12 @@ async fn run_cli_command(cmd: Command) -> Result<()> {
 
             println!("Found {} devices:\n", devices.len());
             for device in &devices {
+                let name = device.hostname.as_deref().unwrap_or("-");
                 println!(
-                    "  {:<16} {}  {}",
+                    "  {:<16} {:<18} {}",
                     device.ip_address,
                     device.mac_address,
-                    device.hostname.as_deref().unwrap_or("")
+                    name
                 );
             }
         }
