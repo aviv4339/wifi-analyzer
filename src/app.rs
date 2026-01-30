@@ -11,8 +11,27 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+use std::sync::Mutex;
+
+static SCANNED_DEVICES: Mutex<Option<Vec<crate::network_map::Device>>> = Mutex::new(None);
 
 const SIGNAL_HISTORY_SIZE: usize = 30;
+
+fn parse_device_type(s: &str) -> crate::network_map::DeviceType {
+    match s {
+        "Router" => crate::network_map::DeviceType::Router,
+        "Phone" => crate::network_map::DeviceType::Phone,
+        "Computer" => crate::network_map::DeviceType::Computer,
+        "Laptop" => crate::network_map::DeviceType::Laptop,
+        "Tablet" => crate::network_map::DeviceType::Tablet,
+        "Smart TV" => crate::network_map::DeviceType::SmartTV,
+        "Printer" => crate::network_map::DeviceType::Printer,
+        "NAS" => crate::network_map::DeviceType::NAS,
+        "IoT Device" => crate::network_map::DeviceType::IoT,
+        "Game Console" => crate::network_map::DeviceType::GameConsole,
+        _ => crate::network_map::DeviceType::Unknown,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
@@ -743,6 +762,166 @@ impl App {
 
     pub fn rename_input_backspace(&mut self) {
         self.rename_input.pop();
+    }
+
+    /// Start a network device scan
+    pub fn start_device_scan(&mut self) {
+        if self.device_scan_progress.is_some() {
+            return; // Already scanning
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.device_scan_receiver = Some(rx);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                use crate::network_map::{discover_devices, identify_all_devices, scan_devices_ports, ScanPhase, ScanProgress};
+
+                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(10);
+
+                // Forward progress to main thread
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(progress) = progress_rx.recv().await {
+                        let _ = tx_clone.send(progress);
+                    }
+                });
+
+                // Phase 1: Discover devices
+                let mut devices = match discover_devices(Some(progress_tx.clone())).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Device discovery error: {}", e);
+                        return;
+                    }
+                };
+
+                // Phase 2: Scan ports
+                if let Err(e) = scan_devices_ports(&mut devices, Some(progress_tx.clone())).await {
+                    eprintln!("Port scan error: {}", e);
+                }
+
+                // Phase 3: Identify devices
+                let _ = progress_tx.send(ScanProgress {
+                    phase: ScanPhase::Identification,
+                    devices_found: devices.len(),
+                    current_device: None,
+                    ports_scanned: 0,
+                    total_ports: 0,
+                }).await;
+
+                identify_all_devices(&mut devices);
+
+                // Send complete signal
+                let _ = progress_tx.send(ScanProgress {
+                    phase: ScanPhase::Complete,
+                    devices_found: devices.len(),
+                    current_device: None,
+                    ports_scanned: 0,
+                    total_ports: 0,
+                }).await;
+
+                // Store devices for main thread to pick up
+                SCANNED_DEVICES.lock().unwrap().replace(devices);
+            });
+        });
+
+        self.device_scan_progress = Some(crate::network_map::ScanProgress {
+            phase: crate::network_map::ScanPhase::Discovery,
+            devices_found: 0,
+            current_device: None,
+            ports_scanned: 0,
+            total_ports: 0,
+        });
+    }
+
+    /// Check for device scan progress updates
+    pub fn check_device_scan_progress(&mut self) {
+        if let Some(ref rx) = self.device_scan_receiver {
+            while let Ok(progress) = rx.try_recv() {
+                if matches!(progress.phase, crate::network_map::ScanPhase::Complete) {
+                    if let Some(devices) = SCANNED_DEVICES.lock().unwrap().take() {
+                        self.devices = devices;
+                        self.persist_devices();
+                    }
+                    self.device_scan_progress = None;
+                    self.device_scan_receiver = None;
+                    self.status_message = Some(format!("Found {} devices", self.devices.len()));
+                    return;
+                }
+                self.device_scan_progress = Some(progress);
+            }
+        }
+    }
+
+    /// Cancel ongoing device scan
+    pub fn cancel_device_scan(&mut self) {
+        self.device_scan_progress = None;
+        self.device_scan_receiver = None;
+    }
+
+    /// Persist scanned devices to database
+    fn persist_devices(&self) {
+        let Some(ref db) = self.db else { return };
+        let network_bssid = self.connected_bssid.as_deref();
+
+        for device in &self.devices {
+            let device_id = match db.upsert_device(
+                &device.mac_address,
+                &device.ip_address,
+                device.hostname.as_deref(),
+                device.vendor.as_deref(),
+                &format!("{}", device.device_type),
+                device.custom_name.as_deref(),
+                network_bssid,
+            ) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            for service in &device.services {
+                if matches!(service.state, crate::network_map::PortState::Open) {
+                    let _ = db.upsert_device_service(
+                        device_id,
+                        service.port,
+                        &format!("{}", service.protocol),
+                        service.service_name.as_deref(),
+                        service.banner.as_deref(),
+                        service.detected_agent.as_deref(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Load devices from database
+    pub fn load_devices_from_db(&mut self) {
+        let Some(ref db) = self.db else { return };
+
+        let network_bssid = self.connected_bssid.as_deref();
+        let records = match db.get_devices_for_network(network_bssid) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        self.devices = records
+            .into_iter()
+            .map(|r| {
+                let mut device = crate::network_map::Device::new(r.mac_address, r.ip_address.unwrap_or_default());
+                device.hostname = r.hostname;
+                device.vendor = r.vendor;
+                device.device_type = r.device_type
+                    .as_deref()
+                    .map(parse_device_type)
+                    .unwrap_or_default();
+                device.custom_name = r.custom_name;
+                device.first_seen = r.first_seen;
+                device.last_seen = r.last_seen;
+                device.is_online = false;
+                device
+            })
+            .collect();
     }
 
     pub fn should_scan(&self) -> bool {
