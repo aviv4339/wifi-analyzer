@@ -1,4 +1,4 @@
-use crate::components::{Component, DetailPanel, NetworkTable, SignalChart, StatusBar};
+use crate::components::{Component, DetailPanel, DeviceDetail, DeviceTable, NetworkTable, SignalChart, StatusBar};
 use crate::connection::{connect_to_network, get_current_connection, import_known_networks};
 use crate::db::{ConnectionRecord, Database, ScanResultRecord};
 use crate::ip::get_all_ips;
@@ -872,52 +872,63 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Header/title
+                Constraint::Length(1),  // Header/tabs
                 Constraint::Min(10),    // Main content
                 Constraint::Length(1),  // Status bar
             ])
             .split(frame.area());
 
-        // Header
-        self.render_header(frame, chunks[0]);
+        // Header with tabs
+        self.render_header_with_tabs(frame, chunks[0]);
 
-        // Main content: table (60%) + detail panel (40%)
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(chunks[1]);
+        // Main content based on current view
+        match self.current_view {
+            AppView::WifiNetworks => {
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(chunks[1]);
 
-        // Network table
-        NetworkTable.render(frame, main_chunks[0], self);
+                NetworkTable.render(frame, main_chunks[0], self);
 
-        // Detail panel with signal chart
-        let detail_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(10), Constraint::Length(5)])
-            .split(main_chunks[1]);
+                let detail_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(10), Constraint::Length(5)])
+                    .split(main_chunks[1]);
 
-        DetailPanel.render(frame, detail_chunks[0], self);
-        SignalChart.render(frame, detail_chunks[1], self);
+                DetailPanel.render(frame, detail_chunks[0], self);
+                SignalChart.render(frame, detail_chunks[1], self);
+            }
+            AppView::NetworkDevices => {
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(chunks[1]);
+
+                DeviceTable.render(frame, main_chunks[0], self);
+                DeviceDetail.render(frame, main_chunks[1], self);
+            }
+        }
 
         // Status bar
         StatusBar.render(frame, chunks[2], self);
 
-        // Help overlay
+        // Overlays
         if self.show_help {
             self.render_help_overlay(frame);
         }
-
-        // Connect popup
         if self.show_connect_popup {
             self.render_connect_popup(frame);
         }
-
-        // Speed test popup
         if self.show_speedtest_popup {
             self.render_speedtest_popup(frame);
         }
-
-        // Error overlay
+        if self.show_rename_dialog {
+            self.render_rename_dialog(frame);
+        }
+        if let Some(ref progress) = self.device_scan_progress {
+            self.render_scan_progress_overlay(frame, progress);
+        }
         if let Some(ref error) = self.error_message {
             self.render_error_overlay(frame, error);
         }
@@ -1055,13 +1066,33 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
+    fn render_header_with_tabs(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
-        use crate::theme::Theme;
 
-        let title = Span::styled(" WiFi Analyzer ", Theme::title_style());
-        let line = Line::from(vec![title]);
+        let wifi_style = if matches!(self.current_view, AppView::WifiNetworks) {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let devices_style = if matches!(self.current_view, AppView::NetworkDevices) {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled("[WiFi Networks]", wifi_style),
+            Span::raw("  "),
+            Span::styled("[Network Devices]", devices_style),
+            Span::raw("                              "),
+            Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+            Span::raw(" to switch"),
+        ]);
+
         let paragraph = Paragraph::new(line);
         frame.render_widget(paragraph, area);
     }
@@ -1113,6 +1144,86 @@ impl App {
                 .style(Theme::border_style())
                 .title(Span::styled(" Help ", Theme::title_style())),
         );
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_rename_dialog(&self, frame: &mut Frame) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = centered_rect(50, 25, frame.area());
+
+        let lines = vec![
+            Line::from(""),
+            Line::from("Enter a custom name for this device:"),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("{}_", self.rename_input),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("[Enter]", Style::default().fg(Color::Green)),
+                Span::raw(" Save  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Red)),
+                Span::raw(" Cancel"),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(Span::styled(" Rename Device ", Style::default().fg(Color::Cyan))),
+            )
+            .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_scan_progress_overlay(&self, frame: &mut Frame, progress: &crate::network_map::ScanProgress) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = centered_rect(40, 20, frame.area());
+
+        let phase_str = format!("{}", progress.phase);
+        let device_str = progress.current_device.as_deref().unwrap_or("");
+        let progress_bar = if progress.total_ports > 0 {
+            let pct = (progress.ports_scanned * 100) / progress.total_ports;
+            let filled = pct / 5;
+            let empty = 20 - filled;
+            format!("[{}{}] {}%", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty), pct)
+        } else {
+            "[\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}]".to_string()
+        };
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(&phase_str, Style::default().fg(Color::Cyan))),
+            Line::from(""),
+            Line::from(progress_bar),
+            Line::from(""),
+            Line::from(format!("Devices found: {}", progress.devices_found)),
+            Line::from(device_str.to_string()),
+            Line::from(""),
+            Line::from(Span::styled("[Esc] Cancel", Style::default().fg(Color::Gray))),
+        ];
+
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(Span::styled(" Scanning Network ", Style::default().fg(Color::Yellow))),
+            )
+            .alignment(ratatui::layout::Alignment::Center);
 
         frame.render_widget(Clear, area);
         frame.render_widget(paragraph, area);
