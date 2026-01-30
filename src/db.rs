@@ -65,6 +65,9 @@ impl Database {
             CREATE SEQUENCE IF NOT EXISTS seq_scan_results_id START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_connections_id START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_known_networks_id START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_devices_id START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_device_services_id START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_device_scans_id START 1;
             "#,
         )?;
 
@@ -135,6 +138,45 @@ impl Database {
                 last_connected_at TIMESTAMP,
                 added_at TIMESTAMP,
                 imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Devices: discovered network devices
+            CREATE TABLE IF NOT EXISTS devices (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_devices_id'),
+                mac_address TEXT NOT NULL UNIQUE,
+                ip_address TEXT,
+                hostname TEXT,
+                vendor TEXT,
+                device_type TEXT,
+                custom_name TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                network_bssid TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address);
+
+            -- Device services: open ports on devices
+            CREATE TABLE IF NOT EXISTS device_services (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_device_services_id'),
+                device_id INTEGER NOT NULL,
+                port INTEGER NOT NULL,
+                protocol TEXT NOT NULL,
+                service_name TEXT,
+                banner TEXT,
+                detected_agent TEXT,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(device_id, port, protocol)
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_services_device ON device_services(device_id);
+
+            -- Device scan history
+            CREATE TABLE IF NOT EXISTS device_scans (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_device_scans_id'),
+                network_bssid TEXT,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                devices_found INTEGER,
+                scan_type TEXT
             );
             "#,
         )?;
@@ -624,6 +666,154 @@ impl Database {
         })?;
         Ok(row.get(0)?)
     }
+
+    // ========== Device Management ==========
+
+    /// Insert or update a device
+    pub fn upsert_device(
+        &self,
+        mac_address: &str,
+        ip_address: &str,
+        hostname: Option<&str>,
+        vendor: Option<&str>,
+        device_type: &str,
+        custom_name: Option<&str>,
+        network_bssid: Option<&str>,
+    ) -> Result<i64> {
+        let mac_upper = mac_address.to_uppercase();
+        let mut stmt = self.conn.prepare("SELECT id FROM devices WHERE mac_address = ?")?;
+        let mut rows = stmt.query(params![mac_upper])?;
+
+        if let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            self.conn.execute(
+                r#"UPDATE devices SET ip_address = ?, hostname = COALESCE(?, hostname),
+                   vendor = COALESCE(?, vendor), device_type = ?,
+                   custom_name = COALESCE(?, custom_name), network_bssid = COALESCE(?, network_bssid),
+                   last_seen = CURRENT_TIMESTAMP WHERE id = ?"#,
+                params![ip_address, hostname, vendor, device_type, custom_name, network_bssid, id],
+            )?;
+            return Ok(id);
+        }
+
+        self.conn.execute(
+            r#"INSERT INTO devices (mac_address, ip_address, hostname, vendor, device_type, custom_name, network_bssid)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            params![mac_upper, ip_address, hostname, vendor, device_type, custom_name, network_bssid],
+        )?;
+
+        let mut stmt = self.conn.prepare("SELECT id FROM devices WHERE mac_address = ?")?;
+        let mut rows = stmt.query(params![mac_upper])?;
+        let row = rows.next()?.ok_or_else(|| color_eyre::eyre::eyre!("Failed to retrieve inserted device"))?;
+        Ok(row.get(0)?)
+    }
+
+    /// Update device custom name
+    pub fn update_device_name(&self, mac_address: &str, custom_name: &str) -> Result<()> {
+        let mac_upper = mac_address.to_uppercase();
+        self.conn.execute("UPDATE devices SET custom_name = ? WHERE mac_address = ?", params![custom_name, mac_upper])?;
+        Ok(())
+    }
+
+    /// Insert or update a service for a device
+    pub fn upsert_device_service(
+        &self,
+        device_id: i64,
+        port: u16,
+        protocol: &str,
+        service_name: Option<&str>,
+        banner: Option<&str>,
+        detected_agent: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"INSERT INTO device_services (device_id, port, protocol, service_name, banner, detected_agent)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (device_id, port, protocol) DO UPDATE SET
+                   service_name = COALESCE(EXCLUDED.service_name, device_services.service_name),
+                   banner = COALESCE(EXCLUDED.banner, device_services.banner),
+                   detected_agent = COALESCE(EXCLUDED.detected_agent, device_services.detected_agent),
+                   last_seen = CURRENT_TIMESTAMP"#,
+            params![device_id, port as i32, protocol, service_name, banner, detected_agent],
+        )?;
+        Ok(())
+    }
+
+    /// Get all devices for a network
+    pub fn get_devices_for_network(&self, network_bssid: Option<&str>) -> Result<Vec<DeviceRecord>> {
+        let query = if network_bssid.is_some() {
+            r#"SELECT id, mac_address, ip_address, hostname, vendor, device_type, custom_name,
+               CAST(first_seen AS VARCHAR), CAST(last_seen AS VARCHAR), network_bssid
+               FROM devices WHERE network_bssid = ? ORDER BY last_seen DESC"#
+        } else {
+            r#"SELECT id, mac_address, ip_address, hostname, vendor, device_type, custom_name,
+               CAST(first_seen AS VARCHAR), CAST(last_seen AS VARCHAR), network_bssid
+               FROM devices ORDER BY last_seen DESC"#
+        };
+
+        let mut stmt = self.conn.prepare(query)?;
+        let mut rows = if let Some(bssid) = network_bssid {
+            stmt.query(params![bssid])?
+        } else {
+            stmt.query([])?
+        };
+
+        let mut devices = Vec::new();
+        while let Some(row) = rows.next()? {
+            let first_seen_str: String = row.get(7)?;
+            let last_seen_str: String = row.get(8)?;
+            devices.push(DeviceRecord {
+                id: row.get(0)?,
+                mac_address: row.get(1)?,
+                ip_address: row.get(2)?,
+                hostname: row.get(3)?,
+                vendor: row.get(4)?,
+                device_type: row.get(5)?,
+                custom_name: row.get(6)?,
+                first_seen: parse_timestamp(&first_seen_str),
+                last_seen: parse_timestamp(&last_seen_str),
+                network_bssid: row.get(9)?,
+            });
+        }
+        Ok(devices)
+    }
+
+    /// Get services for a device
+    pub fn get_device_services(&self, device_id: i64) -> Result<Vec<ServiceRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, port, protocol, service_name, banner, detected_agent FROM device_services WHERE device_id = ? ORDER BY port"
+        )?;
+        let mut rows = stmt.query(params![device_id])?;
+        let mut services = Vec::new();
+        while let Some(row) = rows.next()? {
+            services.push(ServiceRecord {
+                id: row.get(0)?,
+                port: row.get::<_, i32>(1)? as u16,
+                protocol: row.get(2)?,
+                service_name: row.get(3)?,
+                banner: row.get(4)?,
+                detected_agent: row.get(5)?,
+            });
+        }
+        Ok(services)
+    }
+
+    /// Create a device scan record
+    pub fn create_device_scan(&self, network_bssid: Option<&str>, scan_type: &str) -> Result<i64> {
+        self.conn.execute("INSERT INTO device_scans (network_bssid, scan_type) VALUES (?, ?)", params![network_bssid, scan_type])?;
+        let mut stmt = self.conn.prepare("SELECT id FROM device_scans ORDER BY id DESC LIMIT 1")?;
+        let mut rows = stmt.query([])?;
+        let row = rows.next()?.ok_or_else(|| color_eyre::eyre::eyre!("Failed to retrieve inserted device scan"))?;
+        Ok(row.get(0)?)
+    }
+
+    /// Complete a device scan
+    pub fn complete_device_scan(&self, scan_id: i64, devices_found: usize) -> Result<()> {
+        self.conn.execute(
+            "UPDATE device_scans SET completed_at = CURRENT_TIMESTAMP, devices_found = ? WHERE id = ?",
+            params![devices_found as i32, scan_id],
+        )?;
+        Ok(())
+    }
 }
 
 /// Summary of a network's historical data
@@ -673,6 +863,32 @@ pub struct KnownNetwork {
     pub last_connected_at: Option<DateTime<Utc>>,
     pub added_at: Option<DateTime<Utc>>,
     pub imported_at: DateTime<Utc>,
+}
+
+/// Device record from the database
+#[derive(Debug, Clone)]
+pub struct DeviceRecord {
+    pub id: i64,
+    pub mac_address: String,
+    pub ip_address: Option<String>,
+    pub hostname: Option<String>,
+    pub vendor: Option<String>,
+    pub device_type: Option<String>,
+    pub custom_name: Option<String>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub network_bssid: Option<String>,
+}
+
+/// Service record from the database
+#[derive(Debug, Clone)]
+pub struct ServiceRecord {
+    pub id: i64,
+    pub port: u16,
+    pub protocol: String,
+    pub service_name: Option<String>,
+    pub banner: Option<String>,
+    pub detected_agent: Option<String>,
 }
 
 /// Parse a timestamp string from DuckDB
