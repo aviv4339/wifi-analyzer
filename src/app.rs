@@ -27,6 +27,13 @@ pub enum SortField {
     Name,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppView {
+    #[default]
+    WifiNetworks,
+    NetworkDevices,
+}
+
 pub struct App {
     pub networks: Vec<Network>,
     pub selected_index: usize,
@@ -70,6 +77,22 @@ pub struct App {
     pub speedtest_running: Option<(String, Instant)>,
     /// Channel to receive speed test result
     pub speedtest_receiver: Option<std::sync::mpsc::Receiver<SpeedTestResult>>,
+    /// Current view mode
+    pub current_view: AppView,
+    /// Discovered network devices
+    pub devices: Vec<crate::network_map::Device>,
+    /// Selected device index
+    pub selected_device_index: usize,
+    /// Device scan in progress
+    pub device_scan_progress: Option<crate::network_map::ScanProgress>,
+    /// Channel to receive device scan progress
+    pub device_scan_receiver: Option<std::sync::mpsc::Receiver<crate::network_map::ScanProgress>>,
+    /// Show device detail panel
+    pub show_device_detail: bool,
+    /// Show rename dialog
+    pub show_rename_dialog: bool,
+    /// Rename dialog input buffer
+    pub rename_input: String,
 }
 
 impl App {
@@ -105,6 +128,14 @@ impl App {
             current_public_ip: None,
             speedtest_running: None,
             speedtest_receiver: None,
+            current_view: AppView::default(),
+            devices: Vec::new(),
+            selected_device_index: 0,
+            device_scan_progress: None,
+            device_scan_receiver: None,
+            show_device_detail: false,
+            show_rename_dialog: false,
+            rename_input: String::new(),
         }
     }
 
@@ -652,6 +683,66 @@ impl App {
 
     pub fn quit(&mut self) {
         self.should_quit = true;
+    }
+
+    pub fn switch_view(&mut self) {
+        self.current_view = match self.current_view {
+            AppView::WifiNetworks => AppView::NetworkDevices,
+            AppView::NetworkDevices => AppView::WifiNetworks,
+        };
+    }
+
+    pub fn device_navigate_up(&mut self) {
+        if !self.devices.is_empty() && self.selected_device_index > 0 {
+            self.selected_device_index -= 1;
+        }
+    }
+
+    pub fn device_navigate_down(&mut self) {
+        if !self.devices.is_empty() && self.selected_device_index < self.devices.len() - 1 {
+            self.selected_device_index += 1;
+        }
+    }
+
+    pub fn toggle_device_detail(&mut self) {
+        self.show_device_detail = !self.show_device_detail;
+    }
+
+    pub fn start_rename_device(&mut self) {
+        if !self.devices.is_empty() {
+            let device = &self.devices[self.selected_device_index];
+            self.rename_input = device.custom_name.clone().unwrap_or_default();
+            self.show_rename_dialog = true;
+        }
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.show_rename_dialog = false;
+        self.rename_input.clear();
+    }
+
+    pub fn confirm_rename(&mut self) {
+        if !self.devices.is_empty() && !self.rename_input.is_empty() {
+            let device = &mut self.devices[self.selected_device_index];
+            device.custom_name = Some(self.rename_input.clone());
+
+            // Persist to database
+            if let Some(ref db) = self.db {
+                let _ = db.update_device_name(&device.mac_address, &self.rename_input);
+            }
+        }
+        self.show_rename_dialog = false;
+        self.rename_input.clear();
+    }
+
+    pub fn rename_input_char(&mut self, c: char) {
+        if self.rename_input.len() < 32 {
+            self.rename_input.push(c);
+        }
+    }
+
+    pub fn rename_input_backspace(&mut self) {
+        self.rename_input.pop();
     }
 
     pub fn should_scan(&self) -> bool {
