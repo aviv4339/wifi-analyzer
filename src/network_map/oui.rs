@@ -68,8 +68,10 @@ fn get_oui_database() -> &'static HashMap<&'static str, &'static str> {
             map.insert(prefix, "Netgear");
         }
 
-        // ASUS
-        for prefix in ["001731", "04421A", "08606E", "14DAE9", "2C4D54", "50465D", "74D02B", "ACDE48", "F46D04"] {
+        // ASUS / ASUSTek
+        for prefix in ["001731", "04421A", "08606E", "14DAE9", "2C4D54", "50465D", "74D02B", "ACDE48", "F46D04",
+                       "C87F54", "1831BF", "2CFDA1", "34977A", "38D547", "4CEDFB", "60A44C", "707781", "90E6BA",
+                       "9C5C8E", "AC9E17", "B06EBF", "BC5C4C", "D850E6", "E03F49", "F832E4", "FCAA14"] {
             map.insert(prefix, "ASUS");
         }
 

@@ -850,7 +850,30 @@ impl App {
                     self.status_message = Some(format!("Found {} devices", self.devices.len()));
                     return;
                 }
-                self.device_scan_progress = Some(progress);
+                // Only update progress if it's advancing (don't let late port scan messages
+                // overwrite identification progress due to async message ordering)
+                let is_stale = match (&self.device_scan_progress, &progress.phase) {
+                    (Some(current), new_phase) => {
+                        use crate::network_map::ScanPhase;
+                        let current_ord = match current.phase {
+                            ScanPhase::Discovery => 0,
+                            ScanPhase::PortScan => 1,
+                            ScanPhase::Identification => 2,
+                            ScanPhase::Complete => 3,
+                        };
+                        let new_ord = match new_phase {
+                            ScanPhase::Discovery => 0,
+                            ScanPhase::PortScan => 1,
+                            ScanPhase::Identification => 2,
+                            ScanPhase::Complete => 3,
+                        };
+                        new_ord < current_ord
+                    }
+                    _ => false,
+                };
+                if !is_stale {
+                    self.device_scan_progress = Some(progress);
+                }
             }
         }
     }

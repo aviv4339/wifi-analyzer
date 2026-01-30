@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::io::{self, Write};
@@ -39,6 +39,26 @@ struct Args {
     /// Disable database persistence (run in memory-only mode)
     #[arg(long)]
     no_persist: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Scan network devices (CLI mode, no TUI)
+    ScanDevices {
+        /// Show verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Discover devices on the network (ARP only, no port scan)
+    Discover,
+    /// Test port scanning on a specific IP
+    ScanPorts {
+        /// IP address to scan
+        ip: String,
+    },
 }
 
 #[tokio::main]
@@ -46,6 +66,12 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let args = Args::parse();
+
+    // Handle subcommands (CLI mode)
+    if let Some(cmd) = args.command {
+        return run_cli_command(cmd).await;
+    }
+
     let interval = Duration::from_secs(args.interval);
 
     // Enable demo mode if requested
@@ -312,4 +338,217 @@ fn prompt_for_location(db: &Database) -> Result<String> {
     println!("Using location: {}\n", location);
 
     Ok(location.to_string())
+}
+
+/// Run CLI commands (non-TUI mode)
+async fn run_cli_command(cmd: Command) -> Result<()> {
+    use wifi_analyzer::network_map::{
+        discover_devices, identify_device, scan_devices_ports,
+        Device, ScanPhase, ScanProgress, COMMON_PORTS,
+    };
+
+    match cmd {
+        Command::ScanDevices { verbose } => {
+            println!("=== Network Device Scanner ===\n");
+
+            // Phase 1: Discovery
+            println!("[1/3] Discovering devices...");
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ScanProgress>(10);
+
+            // Spawn progress printer
+            let verbose_clone = verbose;
+            let progress_handle = tokio::spawn(async move {
+                while let Some(progress) = progress_rx.recv().await {
+                    if verbose_clone {
+                        match progress.phase {
+                            ScanPhase::Discovery => {
+                                println!("  Discovery: {} devices found", progress.devices_found);
+                            }
+                            ScanPhase::PortScan => {
+                                if let Some(ref dev) = progress.current_device {
+                                    println!(
+                                        "  Port scan: {} ({}/{})",
+                                        dev, progress.ports_scanned, progress.total_ports
+                                    );
+                                }
+                            }
+                            ScanPhase::Identification => {
+                                println!("  Identifying {} devices...", progress.devices_found);
+                            }
+                            ScanPhase::Complete => {
+                                println!("  Complete!");
+                            }
+                        }
+                    }
+                }
+            });
+
+            let mut devices = match discover_devices(Some(progress_tx.clone())).await {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Discovery error: {}", e);
+                    return Ok(());
+                }
+            };
+            println!("  Found {} devices\n", devices.len());
+
+            if devices.is_empty() {
+                println!("No devices found. Make sure you're connected to a network.");
+                return Ok(());
+            }
+
+            // Phase 2: Port scanning
+            println!("[2/3] Scanning ports on {} devices...", devices.len());
+            if let Err(e) = scan_devices_ports(&mut devices, Some(progress_tx.clone())).await {
+                eprintln!("Port scan error: {}", e);
+            }
+            println!("  Port scan complete\n");
+
+            // Phase 3: Identification
+            println!("[3/3] Identifying devices...");
+            let _ = progress_tx
+                .send(ScanProgress {
+                    phase: ScanPhase::Identification,
+                    devices_found: devices.len(),
+                    current_device: None,
+                    ports_scanned: 0,
+                    total_ports: 0,
+                })
+                .await;
+
+            let device_count = devices.len();
+            for (i, device) in devices.iter_mut().enumerate() {
+                if verbose {
+                    println!("  Identifying device {}/{}: {}", i + 1, device_count, device.ip_address);
+                }
+                identify_device(device);
+            }
+            println!("  Identification complete\n");
+
+            // Close progress channel
+            drop(progress_tx);
+            let _ = progress_handle.await;
+
+            // Print results
+            println!("=== Results ===\n");
+            for device in &devices {
+                println!(
+                    "{:<16} {:<18} {:<12} {}",
+                    device.ip_address,
+                    device.mac_address,
+                    format!("{}", device.device_type),
+                    device.vendor.as_deref().unwrap_or("Unknown")
+                );
+
+                if !device.services.is_empty() {
+                    for svc in &device.services {
+                        let agent_str = svc
+                            .detected_agent
+                            .as_ref()
+                            .map(|a| format!(" [AI: {}]", a))
+                            .unwrap_or_default();
+                        println!(
+                            "  └─ :{:<5} {}{}",
+                            svc.port,
+                            svc.service_name.as_deref().unwrap_or("unknown"),
+                            agent_str
+                        );
+                    }
+                }
+            }
+
+            let ai_devices: Vec<_> = devices.iter().filter(|d| !d.detected_agents.is_empty()).collect();
+            if !ai_devices.is_empty() {
+                println!("\n=== AI Agents Detected ===");
+                for device in ai_devices {
+                    println!(
+                        "  {} ({}): {:?}",
+                        device.ip_address,
+                        device.display_name(),
+                        device.detected_agents
+                    );
+                }
+            }
+
+            println!("\nTotal: {} devices", devices.len());
+        }
+
+        Command::Discover => {
+            println!("=== Device Discovery (ARP only) ===\n");
+
+            let devices = match discover_devices(None).await {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Discovery error: {}", e);
+                    return Ok(());
+                }
+            };
+
+            println!("Found {} devices:\n", devices.len());
+            for device in &devices {
+                println!(
+                    "  {:<16} {}  {}",
+                    device.ip_address,
+                    device.mac_address,
+                    device.hostname.as_deref().unwrap_or("")
+                );
+            }
+        }
+
+        Command::ScanPorts { ip } => {
+            println!("=== Port Scan: {} ===\n", ip);
+
+            let mut device = Device::new("00:00:00:00:00:00".to_string(), ip.clone());
+
+            println!("Scanning {} common ports...", COMMON_PORTS.len());
+
+            // Create a single-device vec for scanning
+            let mut devices = vec![device];
+            if let Err(e) = scan_devices_ports(&mut devices, None).await {
+                eprintln!("Port scan error: {}", e);
+                return Ok(());
+            }
+            device = devices.into_iter().next().unwrap();
+
+            // Identify the device
+            identify_device(&mut device);
+
+            println!("\nDevice type: {}", device.device_type);
+            if let Some(ref vendor) = device.vendor {
+                println!("Vendor: {}", vendor);
+            }
+
+            if device.services.is_empty() {
+                println!("\nNo open ports found.");
+            } else {
+                println!("\nOpen ports:");
+                for svc in &device.services {
+                    let agent_str = svc
+                        .detected_agent
+                        .as_ref()
+                        .map(|a| format!(" [AI Agent: {}]", a))
+                        .unwrap_or_default();
+                    let banner_str = svc
+                        .banner
+                        .as_ref()
+                        .map(|b| format!(" \"{}\"", b.chars().take(50).collect::<String>()))
+                        .unwrap_or_default();
+                    println!(
+                        "  :{:<5} {} {}{}{}",
+                        svc.port,
+                        svc.protocol,
+                        svc.service_name.as_deref().unwrap_or("unknown"),
+                        agent_str,
+                        banner_str
+                    );
+                }
+            }
+
+            if !device.detected_agents.is_empty() {
+                println!("\nAI Agents detected: {:?}", device.detected_agents);
+            }
+        }
+    }
+
+    Ok(())
 }
