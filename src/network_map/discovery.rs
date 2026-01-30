@@ -70,7 +70,7 @@ fn parse_arp_cache() -> Result<Vec<Device>> {
     let mut seen_macs = std::collections::HashSet::new();
 
     for line in stdout.lines() {
-        if let Some((ip, mac)) = parse_arp_line(line) {
+        if let Some((hostname, ip, mac)) = parse_arp_line(line) {
             if mac == "(incomplete)" || mac == "ff:ff:ff:ff:ff:ff" {
                 continue;
             }
@@ -79,17 +79,29 @@ fn parse_arp_cache() -> Result<Vec<Device>> {
                 continue;
             }
             seen_macs.insert(mac_upper.clone());
-            devices.push(Device::new(mac_upper, ip));
+            let mut device = Device::new(mac_upper, ip);
+            // Set hostname if it's not just "?"
+            if !hostname.is_empty() && hostname != "?" {
+                device.hostname = Some(hostname);
+            }
+            devices.push(device);
         }
     }
     Ok(devices)
 }
 
-fn parse_arp_line(line: &str) -> Option<(String, String)> {
-    let ip_start = line.find('(')? + 1;
-    let ip_end = line.find(')')?;
-    let ip = line[ip_start..ip_end].to_string();
+/// Parse ARP line format: "hostname (IP) at MAC on interface ..."
+/// Returns (hostname, ip, mac)
+fn parse_arp_line(line: &str) -> Option<(String, String, String)> {
+    // Extract hostname (everything before the opening paren)
+    let ip_start = line.find('(')?;
+    let hostname = line[..ip_start].trim().to_string();
 
+    // Extract IP
+    let ip_end = line.find(')')?;
+    let ip = line[ip_start + 1..ip_end].to_string();
+
+    // Extract MAC
     let at_pos = line.find(" at ")?;
     let after_at = &line[at_pos + 4..];
     let mac_end = after_at.find(' ').unwrap_or(after_at.len());
@@ -98,7 +110,7 @@ fn parse_arp_line(line: &str) -> Option<(String, String)> {
     if ip.parse::<IpAddr>().is_err() {
         return None;
     }
-    Some((ip, mac))
+    Some((hostname, ip, mac))
 }
 
 fn get_default_gateway() -> Result<Option<String>> {
@@ -127,7 +139,7 @@ fn get_mac_for_ip(ip: &str) -> Option<String> {
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_arp_line(&stdout).map(|(_, mac)| mac)
+    parse_arp_line(&stdout).map(|(_, _, mac)| mac)
 }
 
 #[allow(dead_code)]

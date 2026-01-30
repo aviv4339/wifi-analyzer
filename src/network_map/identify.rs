@@ -17,11 +17,82 @@ pub fn identify_device(device: &mut Device) {
         .collect();
 }
 
-/// Infer device type from open ports and vendor
+/// Infer device type from open ports, vendor, and hostname
 fn infer_device_type(device: &Device) -> DeviceType {
     let ports: Vec<u16> = device.services.iter().map(|s| s.port).collect();
     let vendor = device.vendor.as_deref().unwrap_or("");
     let vendor_lower = vendor.to_lowercase();
+    let hostname = device.hostname.as_deref().unwrap_or("").to_lowercase();
+
+    // Hostname-based detection (most reliable when available)
+    if !hostname.is_empty() {
+        // Smart TV by hostname
+        if hostname.contains("tv") || hostname.contains("webos") || hostname.contains("roku")
+            || hostname.contains("firetv") || hostname.contains("chromecast") || hostname.contains("androidtv")
+        {
+            return DeviceType::SmartTV;
+        }
+
+        // Game consoles (check before IoT to not match "switch" in "switchbot")
+        if hostname.contains("xbox") || hostname.contains("playstation") || hostname.contains("ps4")
+            || hostname.contains("ps5") || hostname.contains("nintendo")
+            || (hostname.contains("switch") && !hostname.contains("switchbot"))
+        {
+            return DeviceType::GameConsole;
+        }
+
+        // Apple devices
+        if hostname.contains("iphone") || hostname.contains("ipad") {
+            return DeviceType::Phone;
+        }
+        if hostname.contains("macbook") || hostname.contains("imac") || hostname.contains("-mbp")
+            || hostname.contains("mac-") || hostname == "mac"
+        {
+            return DeviceType::Computer;
+        }
+
+        // Windows/Linux PCs
+        if hostname.contains("desktop") || hostname.contains("laptop") || hostname.contains("-pc")
+            || hostname.contains("workstation")
+        {
+            return DeviceType::Computer;
+        }
+        if hostname.contains("cachyos") || hostname.contains("ubuntu") || hostname.contains("fedora")
+            || hostname.contains("arch") || hostname.contains("debian") || hostname.contains("linux")
+        {
+            return DeviceType::Computer;
+        }
+
+        // IoT devices by hostname
+        if hostname.contains("yeelink") || hostname.contains("yeelight") || hostname.contains("switchbot")
+            || hostname.contains("shelly") || hostname.contains("tasmota") || hostname.contains("tuya")
+            || hostname.contains("sonoff") || hostname.contains("esp_") || hostname.contains("esp32")
+            || hostname.contains("esp8266") || hostname.contains("wled")
+        {
+            return DeviceType::IoT;
+        }
+
+        // Printers
+        if hostname.contains("printer") || hostname.contains("brw") || hostname.contains("brother")
+            || hostname.contains("epson") || hostname.contains("canon") || hostname.contains("hp-")
+        {
+            return DeviceType::Printer;
+        }
+
+        // NAS devices
+        if hostname.contains("nas") || hostname.contains("synology") || hostname.contains("qnap")
+            || hostname.contains("diskstation")
+        {
+            return DeviceType::NAS;
+        }
+
+        // Routers/APs
+        if hostname.contains("router") || hostname.contains("gateway") || hostname.contains("-ap")
+            || hostname.contains("unifi") || hostname.contains("eero") || hostname.contains("orbi")
+        {
+            return DeviceType::Router;
+        }
+    }
 
     // Router detection: DNS + HTTP/HTTPS management
     if ports.contains(&53) && (ports.contains(&80) || ports.contains(&443)) {

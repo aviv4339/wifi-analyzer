@@ -432,12 +432,21 @@ async fn run_cli_command(cmd: Command) -> Result<()> {
             // Print results
             println!("=== Results ===\n");
             for device in &devices {
+                // Show hostname or display name
+                let name = device.hostname.as_deref()
+                    .unwrap_or_else(|| device.vendor.as_deref().unwrap_or("Unknown"));
+                let name_truncated = if name.len() > 24 {
+                    format!("{}...", &name[..21])
+                } else {
+                    name.to_string()
+                };
+
                 println!(
-                    "{:<16} {:<18} {:<12} {}",
+                    "{:<16} {:<25} {:<12} {}",
                     device.ip_address,
-                    device.mac_address,
+                    name_truncated,
                     format!("{}", device.device_type),
-                    device.vendor.as_deref().unwrap_or("Unknown")
+                    device.vendor.as_deref().unwrap_or("-")
                 );
 
                 if !device.services.is_empty() {
