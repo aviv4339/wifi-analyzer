@@ -1366,6 +1366,7 @@ impl App {
     }
 
     fn render_scan_progress_overlay(&self, frame: &mut Frame, progress: &crate::network_map::ScanProgress) {
+        use crate::network_map::ScanPhase;
         use ratatui::style::{Color, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -1373,14 +1374,54 @@ impl App {
         let area = centered_rect(40, 20, frame.area());
 
         let phase_str = format!("{}", progress.phase);
-        let device_str = progress.current_device.as_deref().unwrap_or("");
-        let progress_bar = if progress.total_ports > 0 {
-            let pct = (progress.ports_scanned * 100) / progress.total_ports;
-            let filled = pct / 5;
-            let empty = 20 - filled;
-            format!("[{}{}] {}%", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty), pct)
-        } else {
-            "[\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}]".to_string()
+
+        // Phase-specific progress display
+        let (progress_bar, detail_line) = match progress.phase {
+            ScanPhase::Discovery => {
+                let spinner = ["\u{25dc}", "\u{25dd}", "\u{25de}", "\u{25df}"];
+                let idx = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() / 250) as usize % 4;
+                (
+                    format!("  {}  Scanning ARP cache...", spinner[idx]),
+                    format!("{} devices found so far", progress.devices_found),
+                )
+            }
+            ScanPhase::PortScan => {
+                let device_str = progress.current_device.as_deref().unwrap_or("...");
+                if progress.total_ports > 0 {
+                    let pct = (progress.ports_scanned * 100) / progress.total_ports;
+                    let filled = pct / 5;
+                    let empty = 20 - filled;
+                    (
+                        format!("[{}{}] {}%", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty), pct),
+                        format!("Scanning: {}", device_str),
+                    )
+                } else {
+                    (
+                        "[\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}]".to_string(),
+                        format!("Scanning: {}", device_str),
+                    )
+                }
+            }
+            ScanPhase::Identification => {
+                let spinner = ["\u{25dc}", "\u{25dd}", "\u{25de}", "\u{25df}"];
+                let idx = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() / 250) as usize % 4;
+                (
+                    format!("  {}  Looking up vendors...", spinner[idx]),
+                    format!("Processing {} devices", progress.devices_found),
+                )
+            }
+            ScanPhase::Complete => {
+                (
+                    "[\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}] 100%".to_string(),
+                    "Done!".to_string(),
+                )
+            }
         };
 
         let lines = vec![
@@ -1390,7 +1431,7 @@ impl App {
             Line::from(progress_bar),
             Line::from(""),
             Line::from(format!("Devices found: {}", progress.devices_found)),
-            Line::from(device_str.to_string()),
+            Line::from(detail_line),
             Line::from(""),
             Line::from(Span::styled("[Esc] Cancel", Style::default().fg(Color::Gray))),
         ];
