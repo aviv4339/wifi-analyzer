@@ -155,35 +155,68 @@ async fn main() -> Result<()> {
                         _ => {}
                     }
                 } else {
-                    // Normal key handling
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => app.quit(),
-                        KeyCode::Up | KeyCode::Char('k') => app.navigate_up(),
-                        KeyCode::Down | KeyCode::Char('j') => app.navigate_down(),
-                        KeyCode::Enter => {
-                            app.show_connect_dialog();
-                        }
-                        KeyCode::Char('r') => {
-                            app.trigger_scan();
-                            match app.perform_scan().await {
-                                Ok(()) => {
-                                    app.clear_error();
-                                    // Refresh connection status after scan
-                                    let _ = app.refresh_current_connection();
+                    // Normal key handling based on current view
+                    match app.current_view {
+                        wifi_analyzer::app::AppView::WifiNetworks => {
+                            // WiFi Networks view keys
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => app.quit(),
+                                KeyCode::Tab => app.switch_view(),
+                                KeyCode::Up | KeyCode::Char('k') => app.navigate_up(),
+                                KeyCode::Down | KeyCode::Char('j') => app.navigate_down(),
+                                KeyCode::Enter => {
+                                    app.show_connect_dialog();
                                 }
-                                Err(e) => app.set_error(format!("{}", e)),
+                                KeyCode::Char('r') => {
+                                    app.trigger_scan();
+                                    match app.perform_scan().await {
+                                        Ok(()) => {
+                                            app.clear_error();
+                                            let _ = app.refresh_current_connection();
+                                        }
+                                        Err(e) => app.set_error(format!("{}", e)),
+                                    }
+                                }
+                                KeyCode::Char('d') => {
+                                    enable_demo_mode();
+                                    app.clear_error();
+                                    let _ = app.perform_scan().await;
+                                }
+                                KeyCode::Char('a') => app.toggle_scan_mode(),
+                                KeyCode::Char('s') => app.cycle_sort(),
+                                KeyCode::Char('?') => app.toggle_help(),
+                                _ => {}
                             }
                         }
-                        KeyCode::Char('d') => {
-                            // Switch to demo mode
-                            enable_demo_mode();
-                            app.clear_error();
-                            let _ = app.perform_scan().await;
+                        wifi_analyzer::app::AppView::NetworkDevices => {
+                            // Network Devices view keys
+                            if app.show_rename_dialog {
+                                match key.code {
+                                    KeyCode::Enter => app.confirm_rename(),
+                                    KeyCode::Esc => app.cancel_rename(),
+                                    KeyCode::Backspace => app.rename_input_backspace(),
+                                    KeyCode::Char(c) => app.rename_input_char(c),
+                                    _ => {}
+                                }
+                            } else if app.device_scan_progress.is_some() {
+                                match key.code {
+                                    KeyCode::Esc => app.cancel_device_scan(),
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Char('q') | KeyCode::Esc => app.quit(),
+                                    KeyCode::Tab => app.switch_view(),
+                                    KeyCode::Up | KeyCode::Char('k') => app.device_navigate_up(),
+                                    KeyCode::Down | KeyCode::Char('j') => app.device_navigate_down(),
+                                    KeyCode::Enter => app.toggle_device_detail(),
+                                    KeyCode::Char('s') | KeyCode::Char('S') => app.start_device_scan(),
+                                    KeyCode::Char('r') | KeyCode::Char('R') => app.start_rename_device(),
+                                    KeyCode::Char('?') => app.toggle_help(),
+                                    _ => {}
+                                }
+                            }
                         }
-                        KeyCode::Char('a') => app.toggle_scan_mode(),
-                        KeyCode::Char('s') => app.cycle_sort(),
-                        KeyCode::Char('?') => app.toggle_help(),
-                        _ => {}
                     }
                 }
             }
@@ -191,12 +224,14 @@ async fn main() -> Result<()> {
                 // Check for background speed test completion
                 app.check_speedtest_result();
 
+                // Check for device scan progress
+                app.check_device_scan_progress();
+
                 // Check for auto-scan
                 if app.should_scan() {
                     match app.perform_scan().await {
                         Ok(()) => {
                             app.clear_error();
-                            // Refresh connection status after scan
                             let _ = app.refresh_current_connection();
                         }
                         Err(e) => app.set_error(format!("{}", e)),
