@@ -776,23 +776,25 @@ impl App {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                use crate::network_map::{discover_devices, identify_all_devices, scan_devices_ports, ScanPhase, ScanProgress};
+                use crate::network_map::{discover_devices_with_options, identify_all_devices, scan_devices_ports, ScanPhase, ScanProgress};
 
                 let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(10);
 
                 // Forward progress to main thread
                 let tx_clone = tx.clone();
-                tokio::spawn(async move {
+                let forward_handle = tokio::spawn(async move {
                     while let Some(progress) = progress_rx.recv().await {
                         let _ = tx_clone.send(progress);
                     }
                 });
 
-                // Phase 1: Discover devices
-                let mut devices = match discover_devices(Some(progress_tx.clone())).await {
+                // Phase 1: Discover devices (with ping sweep to find all devices)
+                let mut devices = match discover_devices_with_options(Some(progress_tx.clone()), true).await {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("Device discovery error: {}", e);
+                        drop(progress_tx);
+                        let _ = forward_handle.await;
                         return;
                     }
                 };
@@ -824,6 +826,10 @@ impl App {
 
                 // Store devices for main thread to pick up
                 SCANNED_DEVICES.lock().unwrap().replace(devices);
+
+                // Drop progress_tx to signal forwarding task to exit, then wait for it
+                drop(progress_tx);
+                let _ = forward_handle.await;
             });
         });
 

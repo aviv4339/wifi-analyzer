@@ -176,4 +176,6 @@ pub const COMMON_PORTS: &[u16] = &[
     11434, // Ollama
     9229,  // Node.js debug
     8501,  // Streamlit (Aider)
+    18789, // OpenClaw Gateway WebSocket
+    18793, // OpenClaw Canvas HTTP
 ];

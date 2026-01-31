@@ -18,6 +18,8 @@ A terminal-based WiFi analyzer with a beautiful TUI, designed to help you find a
 - **Location Support** - Organize scans by location (e.g., "office", "cafe")
 - **Auto/Manual Modes** - Auto-refresh with countdown timer or scan on demand
 - **Connect to Networks** - Quick connect via Enter key (opens System WiFi Settings)
+- **Network Map** - Discover all devices on your network with port scanning and service detection
+- **AI Agent Detection** - Identify running AI services (Ollama, Claude Code, LM Studio, etc.)
 
 ## Screenshot
 
@@ -62,7 +64,7 @@ A terminal-based WiFi analyzer with a beautiful TUI, designed to help you find a
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/wifi-analyzer.git
+git clone https://github.com/aviv4339/wifi-analyzer.git
 cd wifi-analyzer
 
 # Build and run
@@ -129,6 +131,38 @@ Options:
   -V, --version             Print version
 ```
 
+## Network Map (CLI)
+
+Discover devices on your local network with port scanning and AI agent detection:
+
+```bash
+# Quick device discovery (ARP cache only)
+cargo run --release -- discover
+
+# Full network sweep (ping all IPs, slower but thorough)
+cargo run --release -- discover --full
+
+# Full scan: discover + port scan + service detection
+cargo run --release -- scan-devices
+
+# Full scan with ping sweep
+cargo run --release -- scan-devices --full --verbose
+
+# Scan ports on a specific IP
+cargo run --release -- scan-ports 192.168.1.100
+```
+
+### What It Detects
+
+- **Device identification** via MAC address vendor lookup
+- **Hostname resolution** from ARP cache
+- **Open ports** on common services (SSH, HTTP, databases, etc.)
+- **AI/LLM agents** running on the network:
+  - Ollama, LM Studio, Llama.cpp
+  - Claude Code, Aider
+  - OpenClaw, Clawdbot, Moldbot
+  - GPT4All, Text Generation WebUI
+
 ## Scoring System
 
 WiFi networks are scored from 0-100 based on multiple factors, optimized for finding the best public WiFi:
@@ -167,6 +201,11 @@ src/
 ├── scoring/
 │   ├── mod.rs           # Score calculation
 │   └── factors.rs       # Individual scoring factors
+├── network_map/
+│   ├── mod.rs           # Device discovery and exports
+│   ├── types.rs         # Device, Service, and scan types
+│   ├── port_scan.rs     # Port scanning and service detection
+│   └── vendor.rs        # MAC address vendor lookup
 └── components/
     ├── mod.rs           # Component trait
     ├── network_table.rs # Network list widget

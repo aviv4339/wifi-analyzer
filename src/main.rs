@@ -350,7 +350,7 @@ fn prompt_for_location(db: &Database) -> Result<String> {
 /// Run CLI commands (non-TUI mode)
 async fn run_cli_command(cmd: Command) -> Result<()> {
     use wifi_analyzer::network_map::{
-        discover_devices, discover_devices_with_options, identify_device, scan_devices_ports,
+        discover_devices_with_options, identify_device, scan_devices_ports,
         Device, ScanPhase, ScanProgress, COMMON_PORTS,
     };
 

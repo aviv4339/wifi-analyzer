@@ -93,7 +93,7 @@ async fn scan_port(ip: &str, port: u16) -> Result<Option<Service>> {
 async fn grab_banner(stream: &mut TcpStream, port: u16) -> Result<Option<String>> {
     let mut buf = [0u8; 256];
     let probe = match port {
-        80 | 8080 | 8000 | 8001 | 3000 | 3001 | 8008 | 11434 => {
+        80 | 8080 | 8000 | 8001 | 3000 | 3001 | 8008 | 11434 | 18789 | 18793 => {
             Some("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
         }
         _ => None,
@@ -124,6 +124,7 @@ fn identify_service(port: u16, banner: Option<&str>) -> Option<String> {
         if banner_lower.contains("ftp") { return Some("FTP".to_string()); }
         if banner_lower.contains("smtp") { return Some("SMTP".to_string()); }
         if banner_lower.contains("ollama") { return Some("Ollama API".to_string()); }
+        if banner_lower.contains("openclaw") { return Some("OpenClaw".to_string()); }
     }
     match port {
         21 => Some("FTP".to_string()),
@@ -147,6 +148,8 @@ fn identify_service(port: u16, banner: Option<&str>) -> Option<String> {
         8501 => Some("Streamlit".to_string()),
         3000 | 3001 => Some("Dev Server".to_string()),
         8000 | 8001 => Some("Python Server".to_string()),
+        18789 => Some("OpenClaw Gateway".to_string()),
+        18793 => Some("OpenClaw Canvas".to_string()),
         _ => None,
     }
 }
@@ -154,10 +157,21 @@ fn identify_service(port: u16, banner: Option<&str>) -> Option<String> {
 fn detect_agent(port: u16, banner: Option<&str>) -> Option<String> {
     if let Some(banner) = banner {
         let banner_lower = banner.to_lowercase();
+        // OpenClaw agents (check first for specific agent names)
+        if banner_lower.contains("openclaw") || banner_lower.contains("open-claw") {
+            // Try to identify specific bot from banner
+            if banner_lower.contains("clawdbot") || banner_lower.contains("clawd") {
+                return Some("Clawdbot (OpenClaw)".to_string());
+            }
+            if banner_lower.contains("moldbot") || banner_lower.contains("mold") {
+                return Some("Moldbot (OpenClaw)".to_string());
+            }
+            return Some("OpenClaw".to_string());
+        }
         // Claude-related agents
         if banner_lower.contains("claude") || banner_lower.contains("anthropic") { return Some("Claude Code".to_string()); }
-        if banner_lower.contains("clawdbot") || banner_lower.contains("claw") { return Some("Clawdbot".to_string()); }
-        if banner_lower.contains("moldbot") || banner_lower.contains("mold") { return Some("Moldbot".to_string()); }
+        if banner_lower.contains("clawdbot") || banner_lower.contains("clawd") { return Some("Clawdbot".to_string()); }
+        if banner_lower.contains("moldbot") { return Some("Moldbot".to_string()); }
         // LLM servers
         if banner_lower.contains("ollama") { return Some("Ollama".to_string()); }
         if banner_lower.contains("llama") || banner_lower.contains("ggml") { return Some("Llama.cpp".to_string()); }
@@ -175,6 +189,7 @@ fn detect_agent(port: u16, banner: Option<&str>) -> Option<String> {
     match port {
         11434 => Some("Ollama".to_string()),
         8501 => Some("Aider (Streamlit)".to_string()),
+        18789 | 18793 => Some("OpenClaw".to_string()),
         _ => None,
     }
 }
